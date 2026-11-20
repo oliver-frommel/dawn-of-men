@@ -9,7 +9,7 @@ var gait_phase := 0.0
 var gait_speed := 2.0
 var is_predator := false
 var is_moving := false
-var opaque_materials: Dictionary[MeshInstance3D, StandardMaterial3D] = {}
+var opaque_materials: Dictionary = {}
 var fade_materials: Dictionary[StandardMaterial3D, StandardMaterial3D] = {}
 
 func configure(species_name: String, phase: float) -> void:
@@ -24,7 +24,8 @@ func set_opacity(opacity: float) -> void:
 	visible = opacity > 0.0
 	if opacity >= 1.0 or opacity <= 0.0:
 		for mesh in opaque_materials:
-			mesh.material_override = opaque_materials[mesh]
+			if is_instance_valid(mesh):
+				mesh.material_override = opaque_materials[mesh]
 		opaque_materials.clear()
 		fade_materials.clear()
 		return
@@ -32,6 +33,8 @@ func set_opacity(opacity: float) -> void:
 		for child in figure.find_children("*", "MeshInstance3D", true, false):
 			var mesh := child as MeshInstance3D
 			var original := mesh.material_override as StandardMaterial3D
+			if original == null:
+				continue
 			if not fade_materials.has(original):
 				var material := original.duplicate() as StandardMaterial3D
 				material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS
@@ -53,9 +56,11 @@ func _process(delta: float) -> void:
 		return
 	gait_phase = fposmod(gait_phase + delta * (gait_speed if is_moving else 0.76), TAU * 10.0)
 	if not is_moving:
-		head.rotation.x = sin(gait_phase) * 0.025
-		head.rotation.y = sin(gait_phase * 0.7) * 0.055
-		tail.rotation.y = sin(gait_phase * 1.4) * 0.12
+		if is_instance_valid(head):
+			head.rotation.x = sin(gait_phase) * 0.025
+			head.rotation.y = sin(gait_phase * 0.7) * 0.055
+		if is_instance_valid(tail):
+			tail.rotation.y = sin(gait_phase * 1.4) * 0.12
 		return
 	var stride := sin(gait_phase) * 0.25
 	for i in range(legs.size()):
@@ -119,7 +124,7 @@ func _build() -> void:
 			leg_length = 0.78
 			neck_length = 0.36
 			gait_speed = 2.5
-		"Wildebeest", "Buffalo":
+		"Wildebeest":
 			heavy = true
 			coat_color = Color("#71604a")
 			body_length = 0.83

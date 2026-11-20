@@ -265,11 +265,7 @@ func _build_body() -> void:
 
 	left_arm = _make_pivot(upper_body, Vector3(-shoulder_width * 0.90, 1.10, 0.0), "LeftArm")
 	right_arm = _make_pivot(upper_body, Vector3(shoulder_width * 0.90, 1.10, 0.0), "RightArm")
-	var arm_length := 0.67 if species_stage == 0 else 0.59
-	if species_stage == 0:
-		arm_length = 0.72
-	if is_robust:
-		arm_length = 0.72
+	var arm_length := 0.72 if species_stage == 0 or is_robust else 0.59
 	var upper_arm_end := Vector3(0.0, -arm_length * 0.48, 0.015)
 	left_forearm = _make_pivot(left_arm, upper_arm_end, "LeftForearm")
 	right_forearm = _make_pivot(right_arm, upper_arm_end, "RightForearm")
