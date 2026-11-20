@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="828" height="450" viewBox="0 0 828 450">
+<defs>
+  <linearGradient id="ground" x1=".15" y1=".05" x2=".88" y2=".95"><stop stop-color="#b5a96d"/><stop offset=".48" stop-color="#908955"/><stop offset="1" stop-color="#68724b"/></linearGradient>
+  <linearGradient id="ridge" x1=".18" y1=".05" x2=".9" y2=".92"><stop stop-color="#b9ab8d"/><stop offset=".38" stop-color="#867d6a"/><stop offset="1" stop-color="#4e5947"/></linearGradient>
+  <linearGradient id="ridgeLight" x1="0" y1="0" x2="1" y2=".85"><stop stop-color="#e1d2ac"/><stop offset=".55" stop-color="#ab9c7c"/><stop offset="1" stop-color="#746f5c"/></linearGradient>
+  <linearGradient id="water" x1="0" y1="0" x2=".9" y2=".7"><stop stop-color="#77a9a4"/><stop offset=".5" stop-color="#477f86"/><stop offset="1" stop-color="#35656f"/></linearGradient>
+  <radialGradient id="sunwash"><stop stop-color="#d7bd7a" stop-opacity=".38"/><stop offset="1" stop-color="#d7bd7a" stop-opacity="0"/></radialGradient>
+  <pattern id="grassgrain" width="44" height="37" patternUnits="userSpaceOnUse">
+    <path d="M4 24 l-2 -6 m5 7 l3 -8 m-6 7 l-5 -4 M20 10 l-2 -6 m5 7 l3 -7 M35 31 l-2 -7 m5 8 l3 -6" fill="none" stroke="#d4bd72" stroke-width="1.2" stroke-linecap="round" opacity=".65"/>
+    <path d="M12 32 l-2 -5 m5 6 l3 -6 M28 22 l-1 -5 m4 6 l3 -5" fill="none" stroke="#596e45" stroke-width="1.1" stroke-linecap="round" opacity=".62"/>
+    <circle cx="31" cy="7" r=".9" fill="#cfac5d" opacity=".7"/>
+  </pattern>
+  <clipPath id="land"><path d="M368 0 L828 250 L460 450 L0 200 Z"/></clipPath>
+</defs>
+<!-- Soft cast shadow, then a single unbroken land surface: no checkerboard tile seams. -->
+<path d="M368 8 L828 258 L460 458 L0 208 Z" fill="#111c18" opacity=".35"/>
+<path d="M368 0 L828 250 L460 450 L0 200 Z" fill="#4e5138"/>
+<g clip-path="url(#land)">
+  <rect width="828" height="450" fill="url(#ground)"/>
+  <rect width="828" height="450" fill="url(#grassgrain)" opacity=".42"/>
+  <ellipse cx="330" cy="94" rx="340" ry="160" fill="url(#sunwash)"/>
+  <path d="M-20 38 Q120 17 248 58 Q320 84 367 135 Q292 181 184 165 Q74 149 -24 196Z" fill="#c0ae71" opacity=".43"/>
+  <path d="M-12 244 Q85 198 180 219 Q274 242 302 318 Q238 382 130 362 Q41 345 -18 399Z" fill="#77804e" opacity=".45"/>
+  <path d="M274 31 Q386 65 459 113 Q506 149 485 210 Q425 236 352 206 Q308 150 250 118Z" fill="#7f8950" opacity=".5"/>
+  <path d="M402 304 Q516 270 628 304 Q715 333 834 291 L845 470 L399 470Z" fill="#87905c" opacity=".38"/>
+  <!-- Wind-carved drainage lines and dry, broken ridges. -->
+  <g fill="none" stroke="#d1bd7c" stroke-width="2" opacity=".32">
+    <path d="M18 119 Q83 91 144 115 T267 145"/><path d="M7 130 Q77 102 139 126 T252 155"/>
+    <path d="M25 288 Q99 252 160 275 T263 316"/><path d="M34 302 Q106 267 164 289 T249 328"/>
+    <path d="M315 95 Q376 125 427 134 T493 163"/><path d="M304 107 Q366 138 418 147 T483 176"/>
+  </g>
+  <g fill="none" stroke="#4e583e" stroke-width="1.5" opacity=".27">
+    <path d="M46 173 Q121 145 196 169 T315 195"/><path d="M43 184 Q118 156 192 181 T303 207"/>
+    <path d="M70 355 Q133 326 204 347 T293 378"/><path d="M438 365 Q533 333 628 361 T808 350"/>
+  </g>
+  <!-- Rift escarpment: layered, broken ridges with broad shaded faces. -->
+  <path d="M430 287 Q471 248 495 221 L520 186 L539 205 L566 154 L589 184 L615 126 L640 169 L666 111 L689 150 L713 92 L738 140 L766 101 L790 162 L822 146 L850 304 Q782 342 712 337 Q620 322 542 350 Q476 345 430 322Z" fill="#59604e" opacity=".72"/>
+  <path d="M449 286 L495 221 L520 186 L546 226 L566 154 L596 207 L615 126 L648 204 L666 111 L698 193 L713 92 L746 183 L766 101 L795 208 L822 146 L849 280 Q780 320 713 313 Q628 303 548 333 Q488 327 449 306Z" fill="url(#ridge)"/>
+  <!-- sun-facing limestone shoulders -->
+  <path d="M495 221 L520 186 L546 226 L536 220 L520 203 L508 229Z M566 154 L596 207 L582 195 L572 179 L558 209Z M615 126 L648 204 L630 190 L619 159 L606 181Z M666 111 L698 193 L682 175 L670 143 L656 171Z M713 92 L746 183 L731 164 L716 130 L701 158Z M766 101 L795 208 L780 187 L766 143 L751 176Z" fill="url(#ridgeLight)" opacity=".92"/>
+  <!-- deep gullies define the opposite mountain faces -->
+  <path d="M520 186 L546 226 L550 270 L530 247Z M566 154 L596 207 L603 260 L581 229Z M615 126 L648 204 L655 263 L634 222Z M666 111 L698 193 L706 256 L684 216Z M713 92 L746 183 L753 246 L731 206Z M766 101 L795 208 L803 263 L782 224Z" fill="#4b5547" opacity=".77"/>
+  <!-- rocky foothills and sediment fans -->
+  <path d="M426 300 Q498 275 553 285 Q624 306 682 286 Q753 264 840 286 L852 352 Q762 357 697 342 Q613 330 544 362 Q472 359 424 335Z" fill="#77795b" opacity=".76"/>
+  <path d="M452 319 Q514 294 568 309 M572 334 Q635 309 690 321 M698 312 Q763 291 816 310" fill="none" stroke="#c1ad7c" stroke-width="2" opacity=".55"/>
+  <!-- Only the highest distant summits catch a pale cap. -->
+  <path d="M607 142 L615 126 L625 150 L619 147 L615 139 L611 148Z M705 106 L713 92 L723 119 L716 112 L712 104 L708 114Z" fill="#e4ddc8" opacity=".9"/>
+  <!-- Rift Valley river and braided seasonal shallows. -->
+  <path d="M410 -14 Q392 38 415 78 Q435 117 399 148 Q365 177 378 210 Q391 241 350 267 Q321 286 340 319 Q358 348 313 374 Q290 392 299 465" fill="none" stroke="#b9aa71" stroke-width="31" stroke-linecap="round" opacity=".72"/>
+  <path d="M410 -14 Q392 38 415 78 Q435 117 399 148 Q365 177 378 210 Q391 241 350 267 Q321 286 340 319 Q358 348 313 374 Q290 392 299 465" fill="none" stroke="url(#water)" stroke-width="22" stroke-linecap="round"/>
+  <path d="M407 -8 Q394 34 417 76 Q433 112 397 146 Q370 177 382 207 Q394 240 353 265 Q326 286 344 317 Q361 347 316 372" fill="none" stroke="#b9d0b0" stroke-width="2.2" stroke-linecap="round" opacity=".65"/>
+  <path d="M398 74 Q412 83 425 88 M375 190 Q390 197 402 199 M329 304 Q347 312 361 313" fill="none" stroke="#dce0b4" stroke-width="1.5" opacity=".7"/>
+  <!-- reed beds along the water -->
+  <g stroke="#b4a762" stroke-width="1.6" stroke-linecap="round" opacity=".9">
+    <path d="M432 101 l-4 -9 m8 12 l4 -11 m-10 13 l-8 -7 M390 229 l-5 -9 m9 11 l5 -10 m-12 12 l-8 -5 M349 327 l-3 -10 m8 12 l5 -10"/>
+  </g>
+  <!-- Coastal shallows and a pale silt delta. -->
+  <path d="M532 377 Q585 357 636 378 Q685 397 737 378 Q786 359 846 378 L850 465 L511 465Z" fill="#477984" opacity=".9"/>
+  <path d="M518 379 Q570 365 619 384 Q671 405 724 384 Q779 365 839 385" fill="none" stroke="#b8b689" stroke-width="10" opacity=".88"/>
+  <path d="M545 398 Q594 386 637 402 M676 411 Q722 397 769 402 M578 427 Q626 415 663 430" fill="none" stroke="#8fc0b4" stroke-width="2" opacity=".75"/>
+  <!-- Acacia and scrub groves, each tree individually varied. -->
+  <g stroke-linejoin="round">
+    <g transform="translate(108 101) scale(1.15)"><ellipse cx="1" cy="8" rx="14" ry="4" fill="#3b4936" opacity=".28"/><path d="M0 6 L1 -9 M1 -1 L-7 -7 M1 -3 L9 -10" fill="none" stroke="#69563b" stroke-width="3"/><path d="M-14 -9 Q-12 -18 -3 -17 Q3 -22 10 -16 Q17 -18 18 -10 Q12 -5 4 -8 Q-3 -4 -10 -7Z" fill="#4c6844"/><path d="M-8 -11 Q-5 -17 1 -15 Q7 -19 12 -12 Q7 -9 2 -11 Q-3 -8 -8 -11Z" fill="#718954"/></g>
+    <g transform="translate(171 138) scale(.85)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#3b4936" opacity=".25"/><path d="M0 6 L1 -10 M1 -3 L-8 -8 M2 -4 L9 -11" fill="none" stroke="#70583b" stroke-width="3"/><path d="M-15 -9 Q-12 -18 -4 -17 Q2 -23 9 -16 Q16 -17 17 -10 Q12 -5 5 -8 Q-2 -4 -10 -7Z" fill="#435d3d"/><path d="M-8 -12 Q-4 -17 1 -15 Q7 -19 12 -12 Q7 -9 1 -11Z" fill="#7e9255"/></g>
+    <g transform="translate(245 88) scale(.95)"><ellipse cx="0" cy="8" rx="16" ry="4" fill="#3b4936" opacity=".28"/><path d="M0 7 L1 -11 M1 -3 L-8 -9 M2 -5 L10 -13" fill="none" stroke="#70583b" stroke-width="3"/><path d="M-16 -10 Q-13 -19 -5 -17 Q0 -24 8 -17 Q16 -18 18 -10 Q12 -4 5 -8 Q-3 -3 -11 -7Z" fill="#49623e"/><path d="M-8 -13 Q-4 -18 2 -16 Q8 -20 13 -12 Q7 -9 2 -11Z" fill="#84995b"/></g>
+    <g transform="translate(318 134) scale(.78)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#3b4936" opacity=".28"/><path d="M0 7 L0 -10 M0 -2 L-8 -8 M0 -4 L8 -12" fill="none" stroke="#69563b" stroke-width="3"/><path d="M-14 -10 Q-12 -18 -4 -17 Q1 -23 8 -16 Q15 -18 17 -10 Q11 -5 4 -8 Q-3 -4 -9 -7Z" fill="#506b45"/><path d="M-7 -13 Q-2 -18 3 -15 Q9 -19 12 -12 Q7 -9 1 -11Z" fill="#8b9b60"/></g>
+    <g transform="translate(95 300) scale(1.05)"><ellipse cx="0" cy="8" rx="16" ry="4" fill="#3b4936" opacity=".28"/><path d="M0 7 L1 -11 M1 -3 L-8 -9 M2 -5 L10 -13" fill="none" stroke="#70583b" stroke-width="3"/><path d="M-16 -10 Q-13 -19 -5 -17 Q0 -24 8 -17 Q16 -18 18 -10 Q12 -4 5 -8 Q-3 -3 -11 -7Z" fill="#405d3e"/><path d="M-8 -13 Q-4 -18 2 -16 Q8 -20 13 -12 Q7 -9 2 -11Z" fill="#7e9656"/></g>
+    <g transform="translate(167 331) scale(.8)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#3b4936" opacity=".26"/><path d="M0 7 L0 -10 M0 -2 L-8 -8 M0 -4 L8 -12" fill="none" stroke="#6b573b" stroke-width="3"/><path d="M-15 -10 Q-12 -18 -4 -17 Q2 -23 9 -16 Q16 -18 17 -10 Q11 -5 4 -8 Q-3 -4 -10 -7Z" fill="#4b6742"/><path d="M-7 -12 Q-2 -17 3 -15 Q9 -19 12 -12 Q7 -9 1 -11Z" fill="#869957"/></g>
+    <g transform="translate(395 77) scale(.9)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#3b4936" opacity=".25"/><path d="M0 7 L0 -10 M0 -3 L-8 -8 M0 -4 L8 -12" fill="none" stroke="#69563b" stroke-width="3"/><path d="M-14 -9 Q-12 -18 -4 -17 Q2 -23 9 -16 Q16 -18 17 -10 Q11 -5 4 -8 Q-3 -4 -10 -7Z" fill="#49623d"/><path d="M-8 -12 Q-3 -17 2 -15 Q8 -19 12 -12 Q7 -9 1 -11Z" fill="#829451"/></g>
+    <g transform="translate(447 111) scale(.76)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#3b4936" opacity=".25"/><path d="M0 7 L1 -10 M1 -2 L-8 -8 M2 -4 L9 -12" fill="none" stroke="#6b573b" stroke-width="3"/><path d="M-14 -10 Q-11 -18 -4 -17 Q2 -23 9 -16 Q16 -18 17 -10 Q11 -5 4 -8 Q-3 -4 -10 -7Z" fill="#4f6742"/><path d="M-7 -13 Q-3 -17 2 -15 Q8 -19 12 -12 Q6 -9 1 -11Z" fill="#859758"/></g>
+    <g transform="translate(204 258) scale(.72)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#384735" opacity=".3"/><path d="M0 7 L0 -10 M0 -2 L-8 -8 M0 -4 L8 -12" fill="none" stroke="#66553a" stroke-width="3"/><path d="M-14 -10 Q-11 -18 -4 -17 Q2 -23 8 -16 Q15 -18 17 -10 Q11 -5 4 -8 Q-3 -4 -10 -7Z" fill="#49633f"/><path d="M-7 -13 Q-2 -18 3 -15 Q9 -19 12 -12 Q6 -9 1 -11Z" fill="#87985b"/></g>
+    <g transform="translate(321 251) scale(.64)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#384735" opacity=".3"/><path d="M0 7 L0 -10 M0 -2 L-8 -8 M0 -4 L8 -12" fill="none" stroke="#66553a" stroke-width="3"/><path d="M-14 -10 Q-11 -18 -4 -17 Q2 -23 8 -16 Q15 -18 17 -10 Q11 -5 4 -8 Q-3 -4 -10 -7Z" fill="#405b3d"/><path d="M-7 -13 Q-2 -18 3 -15 Q9 -19 12 -12 Q6 -9 1 -11Z" fill="#819455"/></g>
+    <g transform="translate(456 168) scale(.68)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#384735" opacity=".3"/><path d="M0 7 L0 -10 M0 -2 L-8 -8 M0 -4 L8 -12" fill="none" stroke="#66553a" stroke-width="3"/><path d="M-14 -10 Q-11 -18 -4 -17 Q2 -23 8 -16 Q15 -18 17 -10 Q11 -5 4 -8 Q-3 -4 -10 -7Z" fill="#4b6741"/><path d="M-7 -13 Q-2 -18 3 -15 Q9 -19 12 -12 Q6 -9 1 -11Z" fill="#8a9a5b"/></g>
+    <g transform="translate(478 336) scale(.75)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#384735" opacity=".3"/><path d="M0 7 L0 -10 M0 -2 L-8 -8 M0 -4 L8 -12" fill="none" stroke="#66553a" stroke-width="3"/><path d="M-14 -10 Q-11 -18 -4 -17 Q2 -23 8 -16 Q15 -18 17 -10 Q11 -5 4 -8 Q-3 -4 -10 -7Z" fill="#49633f"/><path d="M-7 -13 Q-2 -18 3 -15 Q9 -19 12 -12 Q6 -9 1 -11Z" fill="#87985b"/></g>
+    <g transform="translate(30 242) scale(.64)"><ellipse cx="0" cy="8" rx="15" ry="4" fill="#384735" opacity=".3"/><path d="M0 7 L0 -10 M0 -2 L-8 -8 M0 -4 L8 -12" fill="none" stroke="#66553a" stroke-width="3"/><path d="M-14 -10 Q-11 -18 -4 -17 Q2 -23 8 -16 Q15 -18 17 -10 Q11 -5 4 -8 Q-3 -4 -10 -7Z" fill="#4b6741"/><path d="M-7 -13 Q-2 -18 3 -15 Q9 -19 12 -12 Q6 -9 1 -11Z" fill="#8a9a5b"/></g>
+  </g>
+  <!-- Sun-bleached grasses, rocky outcrops and tiny flowering scrub. -->
+  <g stroke-linecap="round" fill="none">
+    <g stroke="#d8bf73" stroke-width="1.5" opacity=".8"><path d="M53 64 l-3 -8 m7 9 l3 -9 m-9 10 l-7 -5 M207 205 l-3 -10 m8 9 l4 -8 m-9 10 l-8 -5 M247 263 l-3 -9 m8 9 l3 -8 m-9 9 l-8 -5 M278 52 l-2 -7 m6 8 l4 -7 m-8 8 l-7 -4 M208 391 l-2 -8 m7 8 l4 -8 m-9 9 l-7 -5 M490 392 l-2 -8 m7 9 l4 -7"/></g>
+    <g stroke="#657047" stroke-width="1.2" opacity=".8"><path d="M72 225 l-3 -7 m7 8 l3 -8 m-8 8 l-6 -4 M220 178 l-2 -8 m6 8 l4 -7 m-7 8 l-6 -5 M300 228 l-3 -8 m8 8 l3 -7 m-9 8 l-7 -4 M458 346 l-3 -8 m7 8 l4 -8 m-9 9 l-7 -5 M489 265 l-2 -7 m7 8 l3 -8"/></g>
+  </g>
+  <g fill="#726953" opacity=".78"><path d="M60 332 l5 -7 8 1 5 6 -8 3Z M223 238 l4 -6 9 1 4 6 -8 3Z M286 367 l5 -7 8 1 5 5 -9 4Z M474 378 l4 -6 8 2 3 5 -8 3Z M271 176 l5 -6 8 2 3 5 -8 3Z"/></g>
+  <g fill="#d2b762"><circle cx="75" cy="341" r="1.6"/><circle cx="231" cy="246" r="1.4"/><circle cx="295" cy="376" r="1.5"/><circle cx="481" cy="385" r="1.5"/></g>
+</g>
+<!-- soft irregular rim catches the light without drawing a grid -->
+<path d="M368 2 L824 250 L460 447 L4 200 Z" fill="none" stroke="#d8c88f" stroke-width="2" opacity=".35"/>
+</svg>
