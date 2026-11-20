@@ -7,6 +7,8 @@ var head: Node3D
 var tail: Node3D
 var gait_phase := 0.0
 var gait_speed := 2.0
+var gait_weight := 0.0
+var initial_heading := Vector2(sin(0.82), cos(0.82))
 var is_predator := false
 var is_moving := false
 var opaque_materials: Dictionary = {}
@@ -48,45 +50,48 @@ func set_opacity(opacity: float) -> void:
 
 func set_moving(moving: bool) -> void:
 	is_moving = moving
-	if not moving:
-		_reset_pose()
+
+
+func set_motion(moving: bool, heading: Vector2, delta: float) -> void:
+	is_moving = moving
+	if heading.length_squared() > 0.0001:
+		initial_heading = heading.normalized()
+		if is_instance_valid(figure):
+			var target_yaw := atan2(initial_heading.x, initial_heading.y)
+			if delta <= 0.0:
+				figure.rotation.y = target_yaw
+			else:
+				figure.rotation.y = lerp_angle(figure.rotation.y, target_yaw, 1.0 - exp(-8.0 * delta))
+
 
 func _process(delta: float) -> void:
 	if not is_instance_valid(figure):
 		return
-	gait_phase = fposmod(gait_phase + delta * (gait_speed if is_moving else 0.76), TAU * 10.0)
-	if not is_moving:
-		if is_instance_valid(head):
-			head.rotation.x = sin(gait_phase) * 0.025
-			head.rotation.y = sin(gait_phase * 0.7) * 0.055
-		if is_instance_valid(tail):
-			tail.rotation.y = sin(gait_phase * 1.4) * 0.12
-		return
-	var stride := sin(gait_phase) * 0.25
+	var blend := 1.0 - exp(-10.0 * delta)
+	gait_weight = lerpf(gait_weight, float(is_moving), blend)
+	if not is_moving and gait_weight < 0.002:
+		gait_weight = 0.0
+	var rate := lerpf(0.76, gait_speed * 2.2, gait_weight)
+	gait_phase = fposmod(gait_phase + delta * rate, TAU * 10.0)
+	var stride := sin(gait_phase) * 0.25 * gait_weight
 	for i in range(legs.size()):
 		var side := 1.0 if i % 2 == 0 else -1.0
 		var pair := 1.0 if i < 2 else -1.0
 		legs[i].rotation.x = stride * side * pair
-	figure.position.y = 0.012 * absf(sin(gait_phase * 2.0))
+	figure.position.y = 0.012 * absf(sin(gait_phase * 2.0)) * gait_weight
 	if is_instance_valid(head):
-		head.rotation.x = sin(gait_phase * 0.5) * 0.035
+		var idle_pitch := sin(gait_phase) * 0.025
+		var walk_pitch := sin(gait_phase * 0.5) * 0.035
+		head.rotation.x = lerpf(idle_pitch, walk_pitch, gait_weight)
+		head.rotation.y = sin(gait_phase * 0.7) * 0.055 * (1.0 - gait_weight)
 	if is_instance_valid(tail):
-		tail.rotation.x = sin(gait_phase * 1.3) * 0.12
+		tail.rotation.x = sin(gait_phase * 1.3) * 0.12 * gait_weight
+		tail.rotation.y = sin(gait_phase * 1.4) * 0.12 * (1.0 - gait_weight)
 
-func _reset_pose() -> void:
-	if not is_instance_valid(figure):
-		return
-	for leg in legs:
-		leg.rotation.x = 0.0
-	figure.position.y = 0.0
-	if is_instance_valid(head):
-		head.rotation.x = 0.0
-	if is_instance_valid(tail):
-		tail.rotation.x = 0.0
 
 func _build() -> void:
 	figure = Node3D.new()
-	figure.rotation.y = 0.82
+	figure.rotation.y = atan2(initial_heading.x, initial_heading.y)
 	add_child(figure)
 	var coat_color := Color("#8d7048")
 	var dark_color := Color("#493a2b")

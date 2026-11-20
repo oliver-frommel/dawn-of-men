@@ -115,10 +115,10 @@ func _ready() -> void:
 		_make_ai_band("Northern roamers", Vector2i(21, 9), [Vector2i(21, 9), Vector2i(25, 4), Vector2i(29, 10), Vector2i(26, 17), Vector2i(21, 9)], Color("#7799b9"), 1.6),
 		_make_ai_band("Eastern Spring camp", WORLD_MAP_SCRIPT.EASTERN_SPRING_TILE, [], Color("#a68cb4"), 0.0)
 	]
+	ai_rng.randomize()
 	_build_hominin_viewport()
 	_sync_hominin_models()
 	_sync_wildlife()
-	ai_rng.randomize()
 	_build_ui()
 	_reveal_around(WORLD_MAP_SCRIPT.WORLD_START, 2)
 	_clamp_camera_offset()
@@ -155,7 +155,7 @@ func _process(delta: float) -> void:
 	if moved or bands_moved:
 		_refresh_mate_button(_season_action_blocker())
 	_sync_hominin_models(delta)
-	if _update_wildlife_visibility(delta) or moved or bands_need_redraw:
+	if _update_wildlife(delta) or moved or bands_need_redraw:
 		queue_redraw()
 	if toast_timer > 0:
 		toast_timer -= delta
@@ -458,42 +458,72 @@ func _wildlife_epoch() -> int:
 
 func _wildlife_roster() -> Array[Dictionary]:
 	var home: Vector2 = world.tile_center(WORLD_MAP_SCRIPT.WORLD_START.x, WORLD_MAP_SCRIPT.WORLD_START.y)
+	var central: Vector2 = world.tile_center(23, 21)
+	var eastern: Vector2 = world.tile_center(40, 29)
+	var southern: Vector2 = world.tile_center(31, 36)
 	match _wildlife_epoch():
 		0:
 			return [
 				{"species":"Hipparion", "at":home + Vector2(-82, -58), "phase":0.2},
 				{"species":"Sivatherium", "at":home + Vector2(80, -70), "phase":1.7},
 				{"species":"Deinotherium", "at":home + Vector2(42, 90), "phase":3.1},
-				{"species":"Dinofelis", "at":home + Vector2(-110, 25), "phase":4.3}
+				{"species":"Dinofelis", "at":home + Vector2(-110, 25), "phase":4.3},
+				{"species":"Hipparion", "at":central, "phase":1.1},
+				{"species":"Sivatherium", "at":eastern, "phase":2.8},
+				{"species":"Deinotherium", "at":southern, "phase":4.9}
 			]
 		1:
 			return [
 				{"species":"Hipparion", "at":home + Vector2(-82, -58), "phase":0.6},
 				{"species":"Antelope", "at":home + Vector2(80, -70), "phase":2.0},
 				{"species":"Deinotherium", "at":home + Vector2(42, 90), "phase":3.7},
-				{"species":"Dinofelis", "at":home + Vector2(-110, 25), "phase":5.0}
+				{"species":"Dinofelis", "at":home + Vector2(-110, 25), "phase":5.0},
+				{"species":"Antelope", "at":central, "phase":1.4},
+				{"species":"Hipparion", "at":eastern, "phase":3.1},
+				{"species":"Dinofelis", "at":southern, "phase":4.2}
 			]
 		2:
 			return [
 				{"species":"Zebra", "at":home + Vector2(-82, -58), "phase":0.2},
 				{"species":"Gazelle", "at":home + Vector2(80, -70), "phase":1.9},
 				{"species":"Elephant", "at":home + Vector2(42, 90), "phase":3.3},
-				{"species":"Lion", "at":home + Vector2(-110, 25), "phase":4.8}
+				{"species":"Lion", "at":home + Vector2(-110, 25), "phase":4.8},
+				{"species":"Zebra", "at":central, "phase":0.9},
+				{"species":"Gazelle", "at":eastern, "phase":2.4},
+				{"species":"Elephant", "at":southern, "phase":3.9}
 			]
 		3:
 			return [
 				{"species":"Zebra", "at":home + Vector2(-82, -58), "phase":0.4},
 				{"species":"Wildebeest", "at":home + Vector2(80, -70), "phase":2.1},
 				{"species":"Elephant", "at":home + Vector2(42, 90), "phase":3.7},
-				{"species":"Lion", "at":home + Vector2(-110, 25), "phase":5.2}
+				{"species":"Lion", "at":home + Vector2(-110, 25), "phase":5.2},
+				{"species":"Wildebeest", "at":central, "phase":1.2},
+				{"species":"Zebra", "at":eastern, "phase":2.9},
+				{"species":"Lion", "at":southern, "phase":4.4}
 			]
 		_:
 			return [
 				{"species":"Giraffe", "at":home + Vector2(-82, -58), "phase":0.4},
 				{"species":"Zebra", "at":home + Vector2(80, -70), "phase":2.1},
 				{"species":"Elephant", "at":home + Vector2(42, 90), "phase":3.7},
-				{"species":"Lion", "at":home + Vector2(-110, 25), "phase":5.2}
+				{"species":"Lion", "at":home + Vector2(-110, 25), "phase":5.2},
+				{"species":"Giraffe", "at":central, "phase":1.5},
+				{"species":"Zebra", "at":eastern, "phase":2.7},
+				{"species":"Elephant", "at":southern, "phase":4.1}
 			]
+
+
+func _wildlife_profile(species_name: String) -> Dictionary:
+	if species_name in ["Deinotherium", "Elephant"]:
+		return {"size": Vector2(25, 7), "speed": 19.0, "roam_radius": 6, "pause_min": 3.0, "pause_max": 6.2}
+	if species_name in ["Sivatherium", "Giraffe"]:
+		return {"size": Vector2(20, 6), "speed": 23.0, "roam_radius": 7, "pause_min": 2.4, "pause_max": 5.0}
+	if species_name in ["Dinofelis", "Lion"]:
+		return {"size": Vector2(16, 5), "speed": 28.0, "roam_radius": 9, "pause_min": 1.8, "pause_max": 4.6}
+	if species_name == "Wildebeest":
+		return {"size": Vector2(17, 5), "speed": 25.0, "roam_radius": 8, "pause_min": 1.8, "pause_max": 4.2}
+	return {"size": Vector2(17, 5), "speed": 31.0, "roam_radius": 8, "pause_min": 1.4, "pause_max": 3.8}
 
 
 func _sync_wildlife() -> void:
@@ -517,33 +547,81 @@ func _sync_wildlife() -> void:
 
 func _make_wildlife(entry: Dictionary) -> Dictionary:
 	var species_name: String = entry["species"]
-	var shadow_size := Vector2(17, 5)
-	if species_name in ["Deinotherium", "Elephant"]:
-		shadow_size = Vector2(25, 7)
-	elif species_name in ["Sivatherium", "Giraffe"]:
-		shadow_size = Vector2(20, 6)
-	elif species_name in ["Dinofelis", "Lion"]:
-		shadow_size = Vector2(16, 5)
+	var profile := _wildlife_profile(species_name)
+	var position: Vector2 = entry["at"]
+	var home_tile: Vector2i = world.nearest_land_tile(world.tile_from_world(position))
+	if not world.land_position(position) or not world.has_land_route_point(world.tile_from_world(position)):
+		position = world.tile_center(home_tile.x, home_tile.y)
+	var heading := Vector2.from_angle(ai_rng.randf_range(0.0, TAU))
 	var model := WILDLIFE_MODEL_SCRIPT.new()
 	model.configure(species_name, float(entry["phase"]))
+	model.set_motion(false, heading, 0.0)
 	model.hide()
 	hominin_stage.add_child(model)
-	var position: Vector2 = entry["at"]
-	if not world.land_position(position):
-		var tile: Vector2i = world.nearest_land_tile(world.tile_from_world(position))
-		position = world.tile_center(tile.x, tile.y)
 	return {
-		"at": position, "size": shadow_size, "species": species_name,
+		"at": position, "position": position, "target": position,
+		"home_tile": home_tile, "heading": heading, "gait_phase": float(entry["phase"]),
+		"moving": false, "speed": float(profile["speed"]), "travel_speed": 0.0,
+		"is_player": false, "route": [],
+		"pause": ai_rng.randf_range(0.4, 2.8),
+		"pause_min": float(profile["pause_min"]), "pause_max": float(profile["pause_max"]),
+		"roam_radius": int(profile["roam_radius"]),
+		"size": profile["size"], "species": species_name,
 		"model": model, "opacity": 0.0, "replacement": {}
 	}
 
 
-func _update_wildlife_visibility(delta: float) -> bool:
+func _pick_wildlife_goal(animal: Dictionary) -> bool:
+	var home_tile: Vector2i = animal["home_tile"]
+	var current_tile: Vector2i = world.tile_from_world(animal["position"])
+	var radius: int = int(animal["roam_radius"])
+	var preferred: Array[Vector2i] = []
+	var fallback: Array[Vector2i] = []
+	for tile in world.tiles_in_radius(home_tile, radius):
+		if tile == current_tile or tile.distance_squared_to(current_tile) < 4:
+			continue
+		if not world.has_land_route_point(tile):
+			continue
+		var terrain: String = world.terrain_at(tile)
+		if terrain in ["highland", "volcanic"]:
+			fallback.append(tile)
+		else:
+			preferred.append(tile)
+	var pool: Array[Vector2i] = preferred if not preferred.is_empty() else fallback
+	for _attempt in range(mini(8, pool.size())):
+		var choice: Vector2i = pool[ai_rng.randi_range(0, pool.size() - 1)]
+		if _route_actor_to(animal, choice):
+			return true
+	return false
+
+
+func _update_wildlife_roaming(animal: Dictionary, delta: float) -> bool:
+	if float(animal["pause"]) > 0.0:
+		animal["pause"] = maxf(0.0, float(animal["pause"]) - delta)
+		animal["moving"] = false
+		return false
+	var position: Vector2 = animal["position"]
+	var target: Vector2 = animal["target"]
+	if position == target and animal["route"].is_empty():
+		animal["moving"] = false
+		if _pick_wildlife_goal(animal):
+			return true
+		animal["pause"] = ai_rng.randf_range(float(animal["pause_min"]), float(animal["pause_max"]))
+		return false
+	var moved := _update_actor(animal, delta, float(animal["speed"]))
+	animal["at"] = animal["position"]
+	if not animal["moving"]:
+		animal["pause"] = ai_rng.randf_range(float(animal["pause_min"]), float(animal["pause_max"]))
+	return moved
+
+
+func _update_wildlife(delta: float) -> bool:
 	var changed := false
 	for i in range(wildlife.size()):
 		var animal := wildlife[i]
 		var model = animal["model"]
 		var replacement: Dictionary = animal["replacement"]
+		var moved := _update_wildlife_roaming(animal, delta)
 		var position: Vector2 = animal["at"]
 		var on_screen := MAP_VIEW.grow(52.0 * zoom_level).has_point(_world_to_screen(position))
 		var mapped := explored_tiles.has(world.tile_id(world.tile_from_world(position)))
@@ -552,7 +630,7 @@ func _update_wildlife_visibility(delta: float) -> bool:
 			model.hide()
 			model.queue_free()
 			wildlife[i] = _make_wildlife(replacement)
-			_position_wildlife_models()
+			_position_wildlife_model(wildlife[i])
 			changed = true
 			continue
 		var target := 1.0 if mapped and replacement.is_empty() else 0.0
@@ -561,23 +639,35 @@ func _update_wildlife_visibility(delta: float) -> bool:
 			animal["opacity"] = next
 			model.set_opacity(next)
 			changed = true
+		if moved:
+			_position_wildlife_model(animal)
+			if next > 0.0 and on_screen:
+				changed = true
+		if next > 0.0:
+			model.set_motion(animal["moving"], animal["heading"], delta)
 	return changed
+
+
+func _position_wildlife_model(animal: Dictionary) -> void:
+	var screen := _world_to_screen(animal["at"])
+	var local := screen - MAP_VIEW.position
+	var model: Node3D = animal["model"]
+	model.position = Vector3(local.x / 45.0, (MAP_VIEW.size.y - local.y) / 45.0, screen.y / MAP_VIEW.size.y * 0.02)
+	model.scale = Vector3.ONE * 0.68 * zoom_level
 
 
 func _position_wildlife_models() -> void:
 	for animal in wildlife:
-		var screen := _world_to_screen(animal["at"])
-		var local := screen - MAP_VIEW.position
-		var model: Node3D = animal["model"]
-		model.position = Vector3(local.x / 45.0, (MAP_VIEW.size.y - local.y) / 45.0, screen.y / MAP_VIEW.size.y * 0.02)
-		model.scale = Vector3.ONE * 0.68 * zoom_level
+		_position_wildlife_model(animal)
 
 
 func _wildlife_caption() -> String:
 	var names: Array[String] = []
 	for animal in wildlife:
 		if animal["opacity"] > 0.1 and MAP_VIEW.has_point(_world_to_screen(animal["at"])):
-			names.append(animal["species"])
+			var species_name: String = animal["species"]
+			if not names.has(species_name):
+				names.append(species_name)
 	if names.is_empty():
 		return "LOCAL WILDLIFE  ·  no tracks in sight"
 	return "LOCAL WILDLIFE  ·  " + " /  ".join(names)

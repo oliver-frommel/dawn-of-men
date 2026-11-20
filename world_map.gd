@@ -173,7 +173,7 @@ func has_land_route_point(tile: Vector2i) -> bool:
 func find_route(origin: Vector2, tile: Vector2i, direct := false) -> Dictionary:
 	var origin_id := tile_id(tile_from_world(origin))
 	var destination_id := tile_id(tile)
-	if terrain_at(tile).is_empty() or not land_routes.has_point(destination_id):
+	if terrain_at(tile).is_empty() or not land_routes.has_point(origin_id) or not land_routes.has_point(destination_id):
 		return {"ok": false, "route": []}
 	var route: Array[Vector2] = []
 	if direct:
