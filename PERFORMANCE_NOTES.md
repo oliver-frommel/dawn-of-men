@@ -15,17 +15,13 @@ Baseline measurements captured in Godot 4.7.2 (`GL Compatibility`) on the `64×4
 
 ## Planned Optimizations (Priority Order)
 
-### 1. Decouple and cache the static 2D map layer (Highest impact)
-- **Problem**: Every movement frame (player, AI bands, or roaming wildlife) calls `queue_redraw()` on `main.gd`, re-running `MapRenderer.draw_map()` and re-submitting tens of thousands of procedural lines/polygons for static terrain, trees, leaf strokes, and mountain facets.
-- **Fix**:
-  - Move static terrain/scenery/frontier/landmarks onto a separate `Node2D` layer (or `8×8` tile chunks cached as `CanvasItem` nodes / `SubViewport` textures) that only redraws when tiles are newly explored, landmarks are discovered, or tile state changes (e.g., future wildfire burn/regrowth).
-  - Keep dynamic per-frame redraws limited to actor shadows, travel trails, activity indicators, and band markers.
-- **Expected gain**: Dynamic frame redraw time drops from `70–104 ms` to `< 1 ms`.
+### 1. Decouple and cache the static 2D map layer (Implemented)
+- **Done**: Split static terrain ground and raised scenery into `4×4` lazy-activated `LayerNode` chunks (`16×12` tiles each) under `MapRoot`, redrawing only dirty chunks on tile state changes or season transitions while panning/zooming via transform and keeping dynamic per-frame redraws to collectibles, shadows, trails, and overlays.
+- **Measured result**: Dynamic frame time at zoom `0.75` dropped from `103.8 ms` → **`~6.0 ms`** (~17× faster).
 
-### 2. Reduce 3D draw calls and share procedural meshes (High impact for WebGL2 & scaling actor counts)
-- **Problem**: Every body part, finger, eye, ear, and trunk joint creates its own `MeshInstance3D` and unique `Mesh`, and `DirectionalLight3D.shadow_enabled = true` renders all ~800 meshes twice per frame despite 2D ground shadows doing the actual grounding.
-- **Fix**:
-  - Disable `sun.shadow_enabled` in `main.gd` (halves 3D draw calls immediately).
+### 2. Reduce 3D draw calls and share procedural meshes (Partially implemented)
+- **Done**: Disabled unused `DirectionalLight3D.shadow_enabled` in `main.gd` (halved 3D draw calls; 2D ground shadows remain intact).
+- **Remaining**:
   - Merge static sub-parts per animated pivot via `SurfaceTool` (e.g., head, torso, limbs/hands/feet) to reduce hominins from `52` → `~10` draw calls and elephants from `54` → `~8` draw calls.
   - Cache/share generated meshes by model signature / species and trim sphere/cylinder subdivisions on sub-pixel parts (eyes, ears, fingers) to cut triangle count by 3–5×.
 

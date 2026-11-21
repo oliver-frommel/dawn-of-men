@@ -17,6 +17,80 @@ func draw_world(canvas: CanvasItem, width: float, height: float) -> void:
 		canvas.draw_line(Vector2(0, y), Vector2(width, y), Color(0.8, 0.76, 0.63, alpha), 1)
 
 
+func draw_ground_chunk(
+	canvas: CanvasItem,
+	x0: int,
+	y0: int,
+	x1: int,
+	y1: int,
+	is_dry_season := false,
+	depleted_tiles: Dictionary = {},
+	wildfire_tiles: Dictionary = {}
+) -> void:
+	for y in range(y0, y1):
+		for x in range(x0, x1):
+			var tile := Vector2i(x, y)
+			var center := world.tile_center(x, y)
+			var id := world.tile_id(tile)
+			var fire_state := str(wildfire_tiles.get(id, {}).get("state", ""))
+			_draw_terrain_ground(canvas, center, tile, world.terrain_at(tile), is_dry_season, depleted_tiles.has(id), fire_state)
+
+
+func draw_scenery_chunk(
+	canvas: CanvasItem,
+	x0: int,
+	y0: int,
+	x1: int,
+	y1: int,
+	discovered_landmarks: Dictionary,
+	is_dry_season := false,
+	depleted_tiles: Dictionary = {},
+	wildfire_tiles: Dictionary = {}
+) -> void:
+	var min_depth := x0 + y0
+	var max_depth := (x1 - 1) + (y1 - 1)
+	for depth in range(min_depth, max_depth + 1):
+		var min_x := maxi(x0, depth - (y1 - 1))
+		var max_x := mini(x1 - 1, depth - y0)
+		for x in range(min_x, max_x + 1):
+			var y := depth - x
+			var tile := Vector2i(x, y)
+			var center := world.tile_center(x, y)
+			var id := world.tile_id(tile)
+			var fire_info: Dictionary = wildfire_tiles.get(id, {})
+			if fire_info.is_empty():
+				_draw_terrain_details(canvas, center, world.terrain_at(tile), x, y)
+			else:
+				_draw_wildfire_details(canvas, center, fire_info, x, y)
+			if depleted_tiles.has(id):
+				_draw_depleted_mark(canvas, center)
+			var landmark := world.landmark_for_tile(tile)
+			if not landmark.is_empty():
+				_draw_landmark_icon(canvas, center, str(landmark["kind"]), is_dry_season, discovered_landmarks.has(id))
+
+
+func draw_dynamic_world(
+	canvas: CanvasItem,
+	map_view: Rect2,
+	world_to_screen: Callable,
+	collectibles: Dictionary,
+	carcass_sites: Dictionary,
+	player_actor: Dictionary,
+	ai_bands: Array[Dictionary],
+	wildlife: Array[Dictionary]
+) -> void:
+	var padded := map_view.grow(65.0)
+	for id in carcass_sites:
+		var tile := Vector2i(int(id) % WorldMapScript.WORLD_WIDTH, floori(float(id) / WorldMapScript.WORLD_WIDTH))
+		var center := world.tile_center(tile.x, tile.y)
+		if padded.has_point(world_to_screen.call(center)):
+			_draw_carcass_icon(canvas, center)
+	for item in collectibles.values():
+		if padded.has_point(world_to_screen.call(item["at"])):
+			_draw_collectible(canvas, item)
+	draw_actor_shadows(canvas, map_view, world_to_screen, player_actor, ai_bands, wildlife)
+
+
 func draw_map(
 	canvas: CanvasItem,
 	map_view: Rect2,
@@ -89,9 +163,9 @@ func draw_actor_shadows(
 		draw_ellipse_shadow(canvas, player_position + Vector2(0.0, 4.0), Vector2(16.0, 5.0))
 	for band in ai_bands:
 		var opacity: float = band["opacity"]
-		if opacity <= 0.0 or band["last_seen"] == null:
+		if opacity <= 0.0:
 			continue
-		var position: Vector2 = band["last_seen"]
+		var position: Vector2 = band["position"]
 		if map_view.grow(65.0).has_point(world_to_screen.call(position)):
 			draw_ellipse_shadow(canvas, position + Vector2(0.0, 4.0), Vector2(44.0, 9.0), 0.22 * opacity)
 	for animal in wildlife:
@@ -139,15 +213,10 @@ func draw_band_markers(
 ) -> void:
 	var font := ThemeDB.fallback_font
 	for band in ai_bands:
-		if band["last_seen"] == null:
-			continue
-		var ground: Vector2 = world_to_screen.call(band["last_seen"])
+		var pos: Vector2 = band["position"]
+		var ground: Vector2 = world_to_screen.call(pos)
 		var label: String = band["label"]
 		var tint: Color = band["color"]
-		if not band["on_charted_land"]:
-			label += " · last seen"
-			if map_view.has_point(ground):
-				canvas.draw_arc(ground, 7.0, 0.0, TAU, 16, tint, 1.4, true)
 		var anchor := ground + Vector2(0, -55.0 * zoom_level)
 		var size := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
 		var badge := Rect2(anchor - Vector2(size.x * 0.5 + 5.0, size.y), size + Vector2(10, 4))
@@ -403,10 +472,15 @@ func _draw_collectible(canvas: CanvasItem, item: Dictionary) -> void:
 			canvas.draw_circle(pt + Vector2(-0.6, -0.8), 1.0, Color("#fff0b5"))
 
 
-func _draw_landmark_icon(canvas: CanvasItem, center: Vector2, kind: String, is_dry_season := false) -> void:
+func _draw_landmark_icon(canvas: CanvasItem, center: Vector2, kind: String, is_dry_season := false, discovered := true) -> void:
 	var badge := center + Vector2(23, -8)
-	canvas.draw_circle(badge, 8.0, Color("#24342d", 0.92))
-	var tint := Color("#f1d393")
+	var bg := Color("#24342d", 0.94) if discovered else Color("#1c2623", 0.72)
+	canvas.draw_circle(badge, 8.5, bg)
+	if discovered:
+		canvas.draw_arc(badge, 8.5, 0.0, TAU, 18, Color("#d8b674", 0.85), 1.2, true)
+	else:
+		canvas.draw_arc(badge, 8.5, 0.0, TAU, 18, Color("#9aa99b", 0.45), 1.0, true)
+	var tint := Color("#f1d393") if discovered else Color("#c5b99c", 0.85)
 	match kind:
 		"fossil":
 			canvas.draw_line(badge + Vector2(-4, 0), badge + Vector2(4, 0), tint, 2.0, true)

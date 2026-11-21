@@ -1,7 +1,20 @@
 extends Node2D
 
+
+class LayerNode extends Node2D:
+	var draw_cb: Callable
+
+	func _draw() -> void:
+		if draw_cb.is_valid():
+			draw_cb.call(self)
+
+
 const W := 1440.0
 const H := 900.0
+const CHUNK_COLS := 4
+const CHUNK_ROWS := 4
+const CHUNK_W := 16
+const CHUNK_H := 12
 const PLAYER_SPEED := 64.0
 const TRAIL_READING_SPEED_BONUS := 12.0
 const ERECTUS_SPEED_BONUS := 16.0
@@ -162,6 +175,12 @@ var keyboard_step := Vector2i.ZERO
 var hominin_viewport: SubViewport
 var hominin_stage: Node3D
 var hominin_models: Array[Node3D] = []
+var map_root: Node2D
+var ground_chunks: Array[LayerNode] = []
+var scenery_chunks: Array[LayerNode] = []
+var chunk_bounds: Array[Rect2] = []
+var dynamic_world_layer: LayerNode
+var overlay_layer: LayerNode
 var wildlife: Array[Dictionary] = []
 var wildlife_epoch := -1
 var explored_tiles: Dictionary = {}
@@ -185,15 +204,18 @@ func _ready() -> void:
 	]
 	ai_rng.randomize()
 	_build_hominin_viewport()
+	_build_map_layers()
 	_sync_hominin_models()
 	_sync_wildlife()
 	_spawn_initial_collectibles()
 	_build_ui()
 	_reveal_around(WORLD_MAP_SCRIPT.WORLD_START, 2)
 	_clamp_camera_offset()
+	_sync_map_transform()
 	_sync_hominin_models()
 	_position_wildlife_models()
 	queue_redraw()
+	_redraw_dynamic()
 	_check_band_encounters()
 
 
@@ -242,7 +264,7 @@ func _process(delta: float) -> void:
 			model.set_process(not sim_paused)
 	if sim_paused:
 		if texts_changed:
-			queue_redraw()
+			_redraw_dynamic()
 		return
 	var sim_delta := delta * time_scale
 	_continue_keyboard_movement(sim_delta)
@@ -251,6 +273,7 @@ func _process(delta: float) -> void:
 	if moved and not camera_dragging:
 		_follow_player_camera()
 	if camera_offset != previous_camera_offset:
+		_sync_map_transform()
 		_position_wildlife_models()
 		moved = true
 	if moved:
@@ -264,8 +287,8 @@ func _process(delta: float) -> void:
 		var band_moved := _update_ai_band(band, sim_delta)
 		bands_moved = bands_moved or band_moved
 		var presence_changed := _update_band_presence(band, sim_delta)
-		if (presence_changed or (band_moved and band["on_charted_land"])) and band["last_seen"] != null:
-			if MAP_VIEW.grow(70.0 * zoom_level).has_point(_world_to_screen(band["last_seen"])):
+		if presence_changed or band_moved:
+			if MAP_VIEW.grow(70.0 * zoom_level).has_point(_world_to_screen(band["position"])):
 				bands_need_redraw = true
 	_check_band_encounters()
 	_sync_hominin_models(sim_delta)
@@ -277,7 +300,7 @@ func _process(delta: float) -> void:
 	if moved or bands_moved or wildlife_changed or picked_up:
 		_refresh_action_label()
 	if wildlife_changed or moved or bands_need_redraw or task_changed or texts_changed or picked_up:
-		queue_redraw()
+		_redraw_dynamic()
 	var action_time := float(player_actor.get("action_time", 0.0))
 	if action_time > 0.0 and active_task.is_empty():
 		action_time = maxf(0.0, action_time - sim_delta)
@@ -285,7 +308,7 @@ func _process(delta: float) -> void:
 		if action_time == 0.0 and player_actor["activity"] not in ["idle", "walking"]:
 			player_actor["activity"] = "idle"
 			_refresh_action_label()
-			queue_redraw()
+			_redraw_dynamic()
 
 
 func _advance_clock(sim_delta: float) -> void:
@@ -324,7 +347,7 @@ func _reveal_around(center: Vector2i, radius: int) -> bool:
 			explored_tiles[id] = true
 			_discover_landmark(tile)
 	_refresh_action_label()
-	queue_redraw()
+	_redraw_dynamic()
 	return true
 
 
@@ -337,6 +360,7 @@ func _discover_landmark(tile: Vector2i) -> void:
 		return
 	discovered_landmarks[id] = true
 	discovered_landmark_names[str(landmark["name"])] = true
+	_mark_chunk_dirty(tile)
 	var rewards: Array[String] = []
 	var food_gain := int(landmark["food"])
 	var knowledge_gain := int(landmark["knowledge"])
@@ -386,8 +410,8 @@ func _make_ai_band(label: String, start: Vector2i, goals: Array, color: Color, p
 	var actor := _make_actor(world.nearest_land_tile(start))
 	actor["label"] = label
 	actor["color"] = color
-	actor["on_charted_land"] = false
-	actor["last_seen"] = null
+	actor["on_charted_land"] = true
+	actor["last_seen"] = actor["position"]
 	var land_goals: Array[Vector2i] = []
 	for goal in goals:
 		land_goals.append(world.nearest_land_tile(goal))
@@ -395,7 +419,7 @@ func _make_ai_band(label: String, start: Vector2i, goals: Array, color: Color, p
 	actor["goal_index"] = 0
 	actor["pause"] = pause
 	actor["speed"] = 39.0
-	actor["opacity"] = 0.0
+	actor["opacity"] = 1.0
 	return actor
 
 
@@ -443,7 +467,7 @@ func _update_actor(actor: Dictionary, delta: float, speed: float) -> bool:
 		actor["activity"] = "idle"
 		actor["action_time"] = 0.0
 		_refresh_action_label()
-		queue_redraw()
+		_redraw_dynamic()
 	return distance > 0.0 or was_moving
 
 
@@ -469,19 +493,13 @@ func _update_ai_band(actor: Dictionary, delta: float) -> bool:
 	return _update_actor(actor, delta, float(actor["speed"]))
 
 
-func _update_band_presence(band: Dictionary, delta: float) -> bool:
-	var position: Vector2 = band["position"]
-	var mapped := explored_tiles.has(world.tile_id(world.tile_from_world(position)))
-	var was_mapped: bool = band["on_charted_land"]
-	band["on_charted_land"] = mapped
-	if mapped:
-		band["last_seen"] = position
-	var opacity: float = band["opacity"]
-	var target := 1.0 if mapped else 0.0
-	var duration := BAND_FADE_IN if mapped else BAND_FADE_OUT
-	var next := move_toward(opacity, target, delta / duration)
-	band["opacity"] = next
-	return mapped != was_mapped or next != opacity
+func _update_band_presence(band: Dictionary, _delta: float) -> bool:
+	band["on_charted_land"] = true
+	band["last_seen"] = band["position"]
+	if float(band["opacity"]) != 1.0:
+		band["opacity"] = 1.0
+		return true
+	return false
 
 
 func _build_hominin_viewport() -> void:
@@ -512,7 +530,7 @@ func _build_hominin_viewport() -> void:
 	sun.rotation_degrees = Vector3(-34.0, -28.0, 0.0)
 	sun.light_color = Color("#ffe5bf")
 	sun.light_energy = 1.1
-	sun.shadow_enabled = true
+	sun.shadow_enabled = false
 	hominin_stage.add_child(sun)
 
 	var camera := Camera3D.new()
@@ -697,7 +715,6 @@ func _make_wildlife(entry: Dictionary) -> Dictionary:
 	var model := WILDLIFE_MODEL_SCRIPT.new()
 	model.configure(species_name, float(entry["phase"]))
 	model.set_motion(false, heading, 0.0)
-	model.hide()
 	hominin_stage.add_child(model)
 	return {
 		"at": position, "position": position, "target": position,
@@ -711,7 +728,7 @@ func _make_wildlife(entry: Dictionary) -> Dictionary:
 		"is_predator": species_name in PREDATOR_SPECIES,
 		"is_prey": species_name in PREY_SPECIES,
 		"encounter_cooldown": 0.0,
-		"model": model, "opacity": 0.0, "replacement": {}
+		"model": model, "opacity": 1.0, "replacement": {}
 	}
 
 
@@ -782,7 +799,6 @@ func _update_wildlife(delta: float) -> bool:
 		var moved := _update_wildlife_roaming(animal, delta)
 		var position: Vector2 = animal["at"]
 		var on_screen := MAP_VIEW.grow(52.0 * zoom_level).has_point(_world_to_screen(position))
-		var mapped := explored_tiles.has(world.tile_id(world.tile_from_world(position)))
 		var opacity: float = animal["opacity"]
 		if not replacement.is_empty() and (opacity <= 0.0 or not on_screen):
 			model.hide()
@@ -791,7 +807,7 @@ func _update_wildlife(delta: float) -> bool:
 			_position_wildlife_model(wildlife[i])
 			changed = true
 			continue
-		var target := 1.0 if mapped and replacement.is_empty() else 0.0
+		var target := 1.0 if replacement.is_empty() else 0.0
 		var next := move_toward(opacity, target, delta / 0.65) if on_screen else target
 		if next != opacity:
 			animal["opacity"] = next
@@ -851,7 +867,7 @@ func _check_predator_encounters() -> void:
 				_event("LINEAGE LOST  /  Shaken and scattered by predators, your band cannot hold together.")
 				_show_summary_overlay()
 		_refresh_ui()
-		queue_redraw()
+		_redraw_dynamic()
 		return
 
 
@@ -1034,7 +1050,7 @@ func _check_collectible_pickups() -> bool:
 		if not Rect2i(0, 0, WORLD_MAP_SCRIPT.WORLD_WIDTH, WORLD_MAP_SCRIPT.WORLD_HEIGHT).has_point(tile):
 			continue
 		var id: int = world.tile_id(tile)
-		if not collectibles.has(id) or not explored_tiles.has(id):
+		if not collectibles.has(id):
 			continue
 		var item: Dictionary = collectibles[id]
 		if player_pos.distance_squared_to(item["at"]) > PICKUP_RANGE * PICKUP_RANGE:
@@ -1078,24 +1094,140 @@ func _check_collectible_pickups() -> bool:
 	return picked
 
 
+func _build_map_layers() -> void:
+	map_root = Node2D.new()
+	map_root.name = "MapRoot"
+	add_child(map_root)
+
+	var ground_root := Node2D.new()
+	ground_root.name = "GroundChunks"
+	map_root.add_child(ground_root)
+
+	var scenery_root := Node2D.new()
+	scenery_root.name = "SceneryChunks"
+	map_root.add_child(scenery_root)
+
+	ground_chunks.resize(CHUNK_COLS * CHUNK_ROWS)
+	scenery_chunks.resize(CHUNK_COLS * CHUNK_ROWS)
+	chunk_bounds.resize(CHUNK_COLS * CHUNK_ROWS)
+
+	# Add chunks in isometric diagonal order (cx + cy) so raised scenery overlaps cleanly.
+	for diag in range(CHUNK_COLS + CHUNK_ROWS - 1):
+		for cx in range(CHUNK_COLS):
+			var cy := diag - cx
+			if cy < 0 or cy >= CHUNK_ROWS:
+				continue
+			var idx := cy * CHUNK_COLS + cx
+			var x0 := cx * CHUNK_W
+			var y0 := cy * CHUNK_H
+			var x1 := mini(WORLD_MAP_SCRIPT.WORLD_WIDTH, x0 + CHUNK_W)
+			var y1 := mini(WORLD_MAP_SCRIPT.WORLD_HEIGHT, y0 + CHUNK_H)
+
+			var top_pt: Vector2 = world.tile_center(x0, y0)
+			var right_pt: Vector2 = world.tile_center(x1 - 1, y0)
+			var bottom_pt: Vector2 = world.tile_center(x1 - 1, y1 - 1)
+			var left_pt: Vector2 = world.tile_center(x0, y1 - 1)
+			var min_x := left_pt.x - WORLD_MAP_SCRIPT.TILE_W
+			var max_x := right_pt.x + WORLD_MAP_SCRIPT.TILE_W
+			var min_y := top_pt.y - WORLD_MAP_SCRIPT.TILE_H - 96.0
+			var max_y := bottom_pt.y + WORLD_MAP_SCRIPT.TILE_H
+			chunk_bounds[idx] = Rect2(Vector2(min_x, min_y), Vector2(max_x - min_x, max_y - min_y))
+
+			var ground_node := LayerNode.new()
+			ground_node.name = "Ground_%d_%d" % [cx, cy]
+			ground_node.visible = false
+			ground_node.draw_cb = func(canvas: CanvasItem) -> void:
+				map_renderer.draw_ground_chunk(canvas, x0, y0, x1, y1, turn % 2 == 1, depleted_tiles, wildfire_tiles)
+			ground_root.add_child(ground_node)
+			ground_chunks[idx] = ground_node
+
+			var scenery_node := LayerNode.new()
+			scenery_node.name = "Scenery_%d_%d" % [cx, cy]
+			scenery_node.visible = false
+			scenery_node.draw_cb = func(canvas: CanvasItem) -> void:
+				map_renderer.draw_scenery_chunk(canvas, x0, y0, x1, y1, discovered_landmarks, turn % 2 == 1, depleted_tiles, wildfire_tiles)
+			scenery_root.add_child(scenery_node)
+			scenery_chunks[idx] = scenery_node
+
+	dynamic_world_layer = LayerNode.new()
+	dynamic_world_layer.name = "DynamicWorld"
+	dynamic_world_layer.draw_cb = _draw_dynamic_world
+	map_root.add_child(dynamic_world_layer)
+
+	overlay_layer = LayerNode.new()
+	overlay_layer.name = "MapOverlay"
+	overlay_layer.draw_cb = _draw_overlay
+	add_child(overlay_layer)
+
+
+func _chunk_index_for_tile(tile: Vector2i) -> int:
+	var cx := clampi(floori(float(tile.x) / CHUNK_W), 0, CHUNK_COLS - 1)
+	var cy := clampi(floori(float(tile.y) / CHUNK_H), 0, CHUNK_ROWS - 1)
+	return cy * CHUNK_COLS + cx
+
+
+func _mark_chunk_dirty(tile: Vector2i) -> void:
+	if ground_chunks.is_empty():
+		return
+	var idx := _chunk_index_for_tile(tile)
+	if ground_chunks[idx].visible:
+		ground_chunks[idx].queue_redraw()
+	if scenery_chunks[idx].visible:
+		scenery_chunks[idx].queue_redraw()
+
+
+func _mark_all_chunks_dirty() -> void:
+	for idx in range(ground_chunks.size()):
+		if ground_chunks[idx].visible:
+			ground_chunks[idx].queue_redraw()
+		if scenery_chunks[idx].visible:
+			scenery_chunks[idx].queue_redraw()
+
+
+func _sync_map_transform() -> void:
+	if not is_instance_valid(map_root):
+		return
+	map_root.position = _map_draw_origin()
+	map_root.scale = Vector2.ONE * zoom_level
+	var world_tl := _screen_to_world(MAP_VIEW.position)
+	var world_br := _screen_to_world(MAP_VIEW.end)
+	var view_world := Rect2(world_tl, world_br - world_tl).grow(80.0)
+	for idx in range(chunk_bounds.size()):
+		if not ground_chunks[idx].visible and chunk_bounds[idx].intersects(view_world):
+			ground_chunks[idx].visible = true
+			scenery_chunks[idx].visible = true
+			ground_chunks[idx].queue_redraw()
+			scenery_chunks[idx].queue_redraw()
+
+
+func _redraw_dynamic() -> void:
+	if is_instance_valid(dynamic_world_layer):
+		dynamic_world_layer.queue_redraw()
+	if is_instance_valid(overlay_layer):
+		overlay_layer.queue_redraw()
+
+
 func _draw() -> void:
 	map_renderer.draw_world(self, W, H)
-	draw_set_transform(_map_draw_origin(), 0.0, Vector2.ONE * zoom_level)
-	map_renderer.draw_map(self, MAP_VIEW, zoom_level, _screen_to_world, explored_tiles, discovered_landmarks, turn % 2 == 1, depleted_tiles, carcass_sites, wildfire_tiles, collectibles)
-	map_renderer.draw_actor_shadows(self, MAP_VIEW, _world_to_screen, player_actor, ai_bands, wildlife)
-	draw_set_transform(Vector2.ZERO)
+
+
+func _draw_dynamic_world(canvas: CanvasItem) -> void:
+	map_renderer.draw_dynamic_world(canvas, MAP_VIEW, _world_to_screen, collectibles, carcass_sites, player_actor, ai_bands, wildlife)
+
+
+func _draw_overlay(canvas: CanvasItem) -> void:
 	if is_instance_valid(hominin_viewport):
-		draw_texture_rect(hominin_viewport.get_texture(), MAP_VIEW, false)
-	draw_set_transform(_map_draw_origin(), 0.0, Vector2.ONE * zoom_level)
+		canvas.draw_texture_rect(hominin_viewport.get_texture(), MAP_VIEW, false)
+	canvas.draw_set_transform(_map_draw_origin(), 0.0, Vector2.ONE * zoom_level)
 	var task_progress := -1.0
 	if not active_task.is_empty() and float(active_task["duration"]) > 0.0:
 		task_progress = float(active_task["elapsed"]) / float(active_task["duration"])
-	map_renderer.draw_player_marker(self, MAP_VIEW, _world_to_screen, player_actor, ai_bands, task_progress)
-	draw_set_transform(Vector2.ZERO)
-	map_renderer.draw_band_markers(self, MAP_VIEW, zoom_level, _world_to_screen, ai_bands)
-	map_renderer.draw_floating_texts(self, MAP_VIEW, _world_to_screen, floating_texts)
-	draw_string(ThemeDB.fallback_font, Vector2(18.0, 94.0), _wildlife_caption(), HORIZONTAL_ALIGNMENT_LEFT, 790.0, 12, Color("#f0dfb8"))
-	draw_string(ThemeDB.fallback_font, Vector2(18.0, 112.0), _pack_caption(), HORIZONTAL_ALIGNMENT_LEFT, 790.0, 11, Color("#c8d7c6"))
+	map_renderer.draw_player_marker(canvas, MAP_VIEW, _world_to_screen, player_actor, ai_bands, task_progress)
+	canvas.draw_set_transform(Vector2.ZERO)
+	map_renderer.draw_band_markers(canvas, MAP_VIEW, zoom_level, _world_to_screen, ai_bands)
+	map_renderer.draw_floating_texts(canvas, MAP_VIEW, _world_to_screen, floating_texts)
+	canvas.draw_string(ThemeDB.fallback_font, Vector2(18.0, 94.0), _wildlife_caption(), HORIZONTAL_ALIGNMENT_LEFT, 790.0, 12, Color("#f0dfb8"))
+	canvas.draw_string(ThemeDB.fallback_font, Vector2(18.0, 112.0), _pack_caption(), HORIZONTAL_ALIGNMENT_LEFT, 790.0, 11, Color("#c8d7c6"))
 
 
 func _clamp_camera_offset() -> void:
@@ -1149,9 +1281,10 @@ func _set_zoom(value: float, focus: Vector2) -> void:
 	var view_center := MAP_VIEW.get_center()
 	camera_offset = world_focus - view_center - (focus - view_center) / zoom_level
 	_clamp_camera_offset()
+	_sync_map_transform()
 	_sync_hominin_models()
 	_position_wildlife_models()
-	queue_redraw()
+	_redraw_dynamic()
 	_refresh_action_label()
 
 
@@ -1476,8 +1609,7 @@ func _tick_wildfires(entering_dry: bool) -> void:
 		return
 	var player_tile: Vector2i = world.tile_from_world(player_actor["position"])
 	var candidates: Array[Vector2i] = []
-	for id in explored_tiles:
-		var tile := Vector2i(int(id) % WORLD_MAP_SCRIPT.WORLD_WIDTH, floori(float(id) / WORLD_MAP_SCRIPT.WORLD_WIDTH))
+	for tile in world.tiles_in_radius(player_tile, 14):
 		if tile == player_tile or tile.distance_squared_to(player_tile) < 4:
 			continue
 		if tile in WORLD_MAP_SCRIPT.SPRING_TILES or not world.landmark_for_tile(tile).is_empty():
@@ -1560,7 +1692,7 @@ func _cancel_active_task(refund := true) -> void:
 		player_actor["activity"] = "idle"
 		player_actor["action_time"] = 0.0
 	_refresh_ui()
-	queue_redraw()
+	_redraw_dynamic()
 
 
 func _start_task(kind: String, activity: String, duration: float, extra: Dictionary = {}) -> void:
@@ -1577,7 +1709,7 @@ func _start_task(kind: String, activity: String, duration: float, extra: Diction
 	player_actor["activity"] = activity
 	player_actor["action_time"] = duration
 	_refresh_ui()
-	queue_redraw()
+	_redraw_dynamic()
 
 
 func _update_active_task(sim_delta: float) -> bool:
@@ -1644,6 +1776,7 @@ func _complete_active_task() -> void:
 				if burn_forage:
 					fire_info["foraged"] = true
 				depleted_tiles[tile_id] = 1 if tile in WORLD_MAP_SCRIPT.SPRING_TILES else 2
+				_mark_chunk_dirty(tile)
 				_change_food(float(food_gain))
 				cohesion += cohesion_gain
 				if food > 0:
@@ -1665,6 +1798,7 @@ func _complete_active_task() -> void:
 		"ember":
 			if wildfire_tiles.has(tile_id):
 				wildfire_tiles[tile_id]["ember_taken"] = true
+				_mark_chunk_dirty(tile)
 			var knowledge_gain := mini(12, 99 - knowledge)
 			var cohesion_gain := mini(4 if _has_skill("ember_carrying") else 2, 100 - cohesion)
 			knowledge += knowledge_gain
@@ -1701,7 +1835,7 @@ func _complete_active_task() -> void:
 			succession_turn = turn + SUCCESSION_SEASONS
 			_event("PAIRING  /  You form a pair with an adult from a neighboring band. Food −%d. Your offspring takes over in %d seasons." % [MATING_FOOD_COST, SUCCESSION_SEASONS])
 	_refresh_ui()
-	queue_redraw()
+	_redraw_dynamic()
 
 
 func _advance_season() -> void:
@@ -1749,7 +1883,8 @@ func _advance_season() -> void:
 		_event("LINEAGE LOST  /  Without enough food and cohesion, your band scatters across the Rift Valley.")
 		_refresh_ui()
 		_show_summary_overlay()
-		queue_redraw()
+		_mark_all_chunks_dirty()
+		_redraw_dynamic()
 		_sync_wildlife()
 		return
 	if food == 0 and not starvation_warned:
@@ -1794,7 +1929,8 @@ func _advance_season() -> void:
 	_refresh_ui()
 	if turn == CHRONICLE_TURNS:
 		_show_summary_overlay()
-	queue_redraw()
+	_mark_all_chunks_dirty()
+	_redraw_dynamic()
 	_sync_wildlife()
 
 
@@ -1934,7 +2070,7 @@ func _on_learn_skill(skill_id: String) -> void:
 	_event(str(skill["chronicle"]))
 	_refresh_ui()
 	_sync_hominin_models()
-	queue_redraw()
+	_redraw_dynamic()
 
 
 func _nearby_shareable_band() -> int:
@@ -2111,7 +2247,7 @@ func _start_player_activity(activity: String, duration: float) -> void:
 	movement_key = KEY_NONE
 	player_actor["activity"] = activity
 	player_actor["action_time"] = duration
-	queue_redraw()
+	_redraw_dynamic()
 
 
 func _refresh_action_label() -> void:
@@ -2312,7 +2448,7 @@ func _set_player_destination(tile: Vector2i, announce := true, direct := false) 
 	if announce:
 		var location: String = map_names[(tile.x + tile.y * 2) % map_names.size()]
 		_show_toast("You travel toward %s." % location)
-	queue_redraw()
+	_redraw_dynamic()
 
 
 func _continue_keyboard_movement(delta: float) -> void:
@@ -2374,9 +2510,10 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and camera_dragging:
 		camera_offset -= event.relative / zoom_level
 		_clamp_camera_offset()
+		_sync_map_transform()
 		_position_wildlife_models()
 		_sync_hominin_models()
-		queue_redraw()
+		_redraw_dynamic()
 		get_viewport().set_input_as_handled()
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
