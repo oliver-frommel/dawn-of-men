@@ -2003,9 +2003,22 @@ func _input(event: InputEvent) -> void:
 		return
 	if (is_instance_valid(skills_overlay) and skills_overlay.visible) or (is_instance_valid(summary_overlay) and summary_overlay.visible):
 		return
+	if event is InputEventMagnifyGesture:
+		if MAP_VIEW.has_point(event.position) and event.factor > 0.0:
+			_set_zoom(zoom_level * event.factor, event.position)
+			get_viewport().set_input_as_handled()
+		return
+	if event is InputEventPanGesture:
+		if MAP_VIEW.has_point(event.position) and absf(event.delta.y) > 0.0001:
+			var step := exp(clampf(-event.delta.y * 0.14, -0.35, 0.35))
+			_set_zoom(zoom_level * step, event.position)
+			get_viewport().set_input_as_handled()
+		return
 	if event is InputEventMouseButton and event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 		if MAP_VIEW.has_point(event.position):
-			var factor := 1.15 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1.0 / 1.15
+			var strength: float = event.factor if event.factor > 0.0 else 1.0
+			var step := pow(1.15, clampf(strength, 0.15, 2.0))
+			var factor := step if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1.0 / step
 			_set_zoom(zoom_level * factor, event.position)
 			get_viewport().set_input_as_handled()
 		return
