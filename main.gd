@@ -47,6 +47,8 @@ const TASK_KINSHIP_DURATION := 3.0
 const WET_WATERHOLE_FORAGE := 18
 const PREDATOR_DANGER_RANGE := 50.0
 const PREDATOR_COOLDOWN_SECS := 8.0
+const PICKUP_RANGE := 34.0
+const MAX_COLLECTIBLES := 64
 const HUNT_RANGE := 86.0
 const SCAVENGE_BASE_FOOD := 14
 const SCAVENGE_FLAKING_FOOD := 20
@@ -107,6 +109,10 @@ var discovered_landmark_names: Dictionary = {}
 var depleted_tiles: Dictionary = {}
 var carcass_sites: Dictionary = {}
 var wildfire_tiles: Dictionary = {}
+var collectibles: Dictionary = {}
+var pack: Dictionary = {"stone": 0, "gourd": 0, "tinder": 0}
+var items_collected := 0
+var floating_texts: Array[Dictionary] = []
 var carried_ember_seasons := 0
 var wildlife_sighted: Dictionary = {}
 var band_share_ready_turn: Dictionary = {}
@@ -181,6 +187,7 @@ func _ready() -> void:
 	_build_hominin_viewport()
 	_sync_hominin_models()
 	_sync_wildlife()
+	_spawn_initial_collectibles()
 	_build_ui()
 	_reveal_around(WORLD_MAP_SCRIPT.WORLD_START, 2)
 	_clamp_camera_offset()
@@ -227,12 +234,15 @@ func _process(delta: float) -> void:
 		toast_timer -= delta
 		if toast_timer <= 0 and is_instance_valid(toast_label):
 			toast_label.hide()
+	var texts_changed := _update_floating_texts(delta)
 	var sim_paused := _is_sim_paused()
 	for animal in wildlife:
 		var model: Node = animal["model"]
 		if is_instance_valid(model):
 			model.set_process(not sim_paused)
 	if sim_paused:
+		if texts_changed:
+			queue_redraw()
 		return
 	var sim_delta := delta * time_scale
 	_continue_keyboard_movement(sim_delta)
@@ -261,11 +271,12 @@ func _process(delta: float) -> void:
 	_sync_hominin_models(sim_delta)
 	var wildlife_changed := _update_wildlife(sim_delta)
 	_check_predator_encounters()
+	var picked_up := _check_collectible_pickups()
 	var task_changed := _update_active_task(sim_delta)
 	_advance_clock(sim_delta)
-	if moved or bands_moved or wildlife_changed:
+	if moved or bands_moved or wildlife_changed or picked_up:
 		_refresh_action_label()
-	if wildlife_changed or moved or bands_need_redraw or task_changed:
+	if wildlife_changed or moved or bands_need_redraw or task_changed or texts_changed or picked_up:
 		queue_redraw()
 	var action_time := float(player_actor.get("action_time", 0.0))
 	if action_time > 0.0 and active_task.is_empty():
@@ -823,6 +834,12 @@ func _check_predator_encounters() -> void:
 			_change_food(-2.0)
 			cohesion = mini(100, cohesion + 1)
 			_event("PREDATOR HELD OFF  /  Flaked stones and shouts keep a %s at bay. Food −2, cohesion +1." % pred_name)
+		elif int(pack["stone"]) > 0:
+			pack["stone"] = int(pack["stone"]) - 1
+			_change_food(-1.0)
+			cohesion = mini(100, cohesion + 1)
+			_spawn_floating_text("Flint thrown! Predator repelled", player_pos, Color("#9dd2c4"))
+			_event("FLINT DEFENSE  /  You hurl a collected flint core to drive back a stalking %s. Food −1, cohesion +1." % pred_name)
 		else:
 			_cancel_active_task(true)
 			_change_food(-6.0)
@@ -910,10 +927,161 @@ func _wildlife_caption() -> String:
 	return "LOCAL WILDLIFE  ·  " + " /  ".join(names)
 
 
+func _pack_caption() -> String:
+	return "PACK  ·  Flint %d  ·  Water Gourds %d  ·  Tinder %d  ·  Collected %d" % [
+		int(pack["stone"]), int(pack["gourd"]), int(pack["tinder"]), items_collected
+	]
+
+
+func _spawn_floating_text(text: String, at: Vector2, color: Color) -> void:
+	floating_texts.append({"text": text, "at": at, "color": color, "age": 0.0, "duration": 1.45})
+
+
+func _update_floating_texts(delta: float) -> bool:
+	if floating_texts.is_empty():
+		return false
+	var keep: Array[Dictionary] = []
+	for item in floating_texts:
+		item["age"] = float(item["age"]) + delta
+		if float(item["age"]) < float(item["duration"]):
+			keep.append(item)
+	floating_texts = keep
+	return true
+
+
+func _collectible_kind_for_terrain(terrain: String, is_dry := false) -> String:
+	match terrain:
+		"woodland":
+			if is_dry:
+				return "tinder" if ai_rng.randf() < 0.65 else "berries"
+			return "berries" if ai_rng.randf() < 0.65 else "tinder"
+		"wetland":
+			return "berries" if ai_rng.randf() < 0.72 else "ochre"
+		"volcanic":
+			return "stone" if ai_rng.randf() < 0.78 else "ochre"
+		"highland":
+			return "stone" if ai_rng.randf() < 0.55 else "ochre"
+		"dryland":
+			if is_dry:
+				return "gourd" if ai_rng.randf() < 0.58 else "stone"
+			return "gourd" if ai_rng.randf() < 0.48 else "stone"
+		"savanna":
+			var r := ai_rng.randf()
+			if r < (0.48 if is_dry else 0.34):
+				return "gourd"
+			if r < 0.74:
+				return "tinder"
+			if r < 0.90:
+				return "berries"
+			return "ochre"
+	return ""
+
+
+func _place_collectible(tile: Vector2i, kind: String) -> bool:
+	if kind.is_empty() or not world.has_land_route_point(tile):
+		return false
+	var id: int = world.tile_id(tile)
+	if collectibles.has(id) or wildfire_tiles.get(id, {}).get("state", "") == "burning":
+		return false
+	var center: Vector2 = world.tile_center(tile.x, tile.y)
+	var offset := Vector2(ai_rng.randf_range(-14.0, 14.0), ai_rng.randf_range(-7.0, 7.0))
+	var pos := center + offset if world.land_position(center + offset) else center
+	collectibles[id] = {"kind": kind, "at": pos, "tile": tile}
+	return true
+
+
+func _spawn_initial_collectibles() -> void:
+	collectibles.clear()
+	# Guarantee 3 varied starter collectibles within immediate sight of the starting camp.
+	var starter_specs := [
+		{"offset": Vector2i(1, 0), "kind": "berries"},
+		{"offset": Vector2i(-1, 1), "kind": "stone"},
+		{"offset": Vector2i(0, -1), "kind": "ochre"}
+	]
+	for spec in starter_specs:
+		var tile: Vector2i = WORLD_MAP_SCRIPT.WORLD_START + (spec["offset"] as Vector2i)
+		if not _place_collectible(tile, spec["kind"]):
+			var fallback: Vector2i = world.nearest_land_tile(tile)
+			if fallback != WORLD_MAP_SCRIPT.WORLD_START:
+				_place_collectible(fallback, spec["kind"])
+	_replenish_collectibles(false, 56)
+
+
+func _replenish_collectibles(is_dry: bool, count := 5) -> void:
+	var player_tile: Vector2i = world.tile_from_world(player_actor["position"])
+	var placed := 0
+	for _attempt in range(count * 12):
+		if placed >= count or collectibles.size() >= MAX_COLLECTIBLES:
+			break
+		var tile := Vector2i(ai_rng.randi_range(1, WORLD_MAP_SCRIPT.WORLD_WIDTH - 2), ai_rng.randi_range(1, WORLD_MAP_SCRIPT.WORLD_HEIGHT - 2))
+		if tile == player_tile or tile.distance_squared_to(player_tile) < 2:
+			continue
+		var kind := _collectible_kind_for_terrain(world.terrain_at(tile), is_dry)
+		if _place_collectible(tile, kind):
+			placed += 1
+
+
+func _check_collectible_pickups() -> bool:
+	if _run_ended() or collectibles.is_empty():
+		return false
+	var player_pos: Vector2 = player_actor["position"]
+	var center_tile: Vector2i = world.tile_from_world(player_pos)
+	var picked := false
+	var check_tiles: Array[Vector2i] = [center_tile]
+	for edge in WORLD_MAP_SCRIPT.TILE_EDGES:
+		check_tiles.append(center_tile + edge)
+	for tile in check_tiles:
+		if not Rect2i(0, 0, WORLD_MAP_SCRIPT.WORLD_WIDTH, WORLD_MAP_SCRIPT.WORLD_HEIGHT).has_point(tile):
+			continue
+		var id: int = world.tile_id(tile)
+		if not collectibles.has(id) or not explored_tiles.has(id):
+			continue
+		var item: Dictionary = collectibles[id]
+		if player_pos.distance_squared_to(item["at"]) > PICKUP_RANGE * PICKUP_RANGE:
+			continue
+		collectibles.erase(id)
+		items_collected += 1
+		picked = true
+		var kind: String = item["kind"]
+		var at: Vector2 = item["at"]
+		match kind:
+			"berries":
+				var before_food := food
+				_change_food(8.0)
+				var gain := food - before_food
+				if before_food < 45:
+					cohesion = mini(100, cohesion + 1)
+				_spawn_floating_text("+%d Food · Wild Figs" % gain, at, Color("#b6dc8b"))
+				_show_toast("Collected wild figs (food +%d)." % gain)
+			"stone":
+				pack["stone"] = int(pack["stone"]) + 1
+				var k_gain := mini(2, 99 - knowledge)
+				knowledge += k_gain
+				_spawn_floating_text("+1 Flint · +%d K" % k_gain, at, Color("#9dd2c4"))
+				_show_toast("Collected flint core (+%d knowledge; boosts hunts & repels predators)." % k_gain)
+			"gourd":
+				pack["gourd"] = int(pack["gourd"]) + 1
+				_spawn_floating_text("+1 Water Gourd", at, Color("#efd69d"))
+				_show_toast("Collected water gourd (cuts dry-season inland food drain by 2).")
+			"ochre":
+				var k_gain := mini(5, 99 - knowledge)
+				var c_gain := mini(3, 100 - cohesion)
+				knowledge += k_gain
+				cohesion += c_gain
+				_spawn_floating_text("+%d K · +%d Cohesion · Red Ochre" % [k_gain, c_gain], at, Color("#f29d79"))
+				_event("RED OCHRE  /  You collect vivid mineral pigment. Knowledge +%d, cohesion +%d." % [k_gain, c_gain])
+			"tinder":
+				pack["tinder"] = int(pack["tinder"]) + 1
+				_spawn_floating_text("+1 Dry Tinder", at, Color("#f4ca72"))
+				_show_toast("Collected dry tinder (cuts Practice cost by 2 food & adds +3 knowledge).")
+		_refresh_ui()
+	return picked
+
+
 func _draw() -> void:
 	map_renderer.draw_world(self, W, H)
 	draw_set_transform(_map_draw_origin(), 0.0, Vector2.ONE * zoom_level)
-	map_renderer.draw_map(self, MAP_VIEW, zoom_level, _screen_to_world, explored_tiles, discovered_landmarks, turn % 2 == 1, depleted_tiles, carcass_sites, wildfire_tiles)
+	map_renderer.draw_map(self, MAP_VIEW, zoom_level, _screen_to_world, explored_tiles, discovered_landmarks, turn % 2 == 1, depleted_tiles, carcass_sites, wildfire_tiles, collectibles)
 	map_renderer.draw_actor_shadows(self, MAP_VIEW, _world_to_screen, player_actor, ai_bands, wildlife)
 	draw_set_transform(Vector2.ZERO)
 	if is_instance_valid(hominin_viewport):
@@ -925,7 +1093,9 @@ func _draw() -> void:
 	map_renderer.draw_player_marker(self, MAP_VIEW, _world_to_screen, player_actor, ai_bands, task_progress)
 	draw_set_transform(Vector2.ZERO)
 	map_renderer.draw_band_markers(self, MAP_VIEW, zoom_level, _world_to_screen, ai_bands)
+	map_renderer.draw_floating_texts(self, MAP_VIEW, _world_to_screen, floating_texts)
 	draw_string(ThemeDB.fallback_font, Vector2(18.0, 94.0), _wildlife_caption(), HORIZONTAL_ALIGNMENT_LEFT, 790.0, 12, Color("#f0dfb8"))
+	draw_string(ThemeDB.fallback_font, Vector2(18.0, 112.0), _pack_caption(), HORIZONTAL_ALIGNMENT_LEFT, 790.0, 11, Color("#c8d7c6"))
 
 
 func _clamp_camera_offset() -> void:
@@ -1116,7 +1286,7 @@ func _show_summary_overlay() -> void:
 		+ "Landmarks discovered:  %d / %d\n"
 		+ "Generations lived:  %d\n"
 		+ "Final stores:  Food %d  ·  Knowledge %d  ·  Cohesion %d\n\n"
-		+ "Wildlife species sighted:  %d\n"
+		+ "Wildlife species sighted:  %d   ·   Items collected:  %d\n"
 		+ "Hunts completed:  %d   ·   Scavenges:  %d   ·   Shared camps:  %d\n"
 		+ "Neanderthal kinship:  %s\n\n"
 		+ "Skills mastered (%d / %d):\n%s"
@@ -1125,7 +1295,7 @@ func _show_summary_overlay() -> void:
 		discovered_landmark_names.size(), WORLD_MAP_SCRIPT.LANDMARKS.size(),
 		generation,
 		food, knowledge, cohesion,
-		wildlife_sighted.size(),
+		wildlife_sighted.size(), items_collected,
 		hunts_completed, scavenges_completed, band_shares_completed,
 		"Recorded" if kinship_recorded else "Unrecorded",
 		learned_skills.size(), TECH_TREE_SCRIPT.SKILLS.size(), skills_text
@@ -1251,19 +1421,25 @@ func _scout_radius() -> int:
 
 
 func _practice_food_cost(tile: Vector2i) -> int:
+	var cost := BASE_PRACTICE_FOOD_COST
 	if _has_skill("hearth_keeping") and tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE:
-		return HEARTH_PRACTICE_FOOD_COST
-	if _has_skill("ember_carrying"):
-		return EMBER_PRACTICE_FOOD_COST
-	return BASE_PRACTICE_FOOD_COST
+		cost = HEARTH_PRACTICE_FOOD_COST
+	elif _has_skill("ember_carrying"):
+		cost = EMBER_PRACTICE_FOOD_COST
+	if int(pack["tinder"]) > 0:
+		cost = maxi(2, cost - 2)
+	return cost
 
 
-func _season_food_cost(tile: Vector2i, next_turn: int) -> int:
-	if next_turn % 2 == 0:
+func _season_food_cost(tile: Vector2i, season_turn: int) -> int:
+	if season_turn % 2 == 0:
 		return WET_SEASON_FOOD_COST
 	if world.near_permanent_water(tile):
 		return DRY_SEASON_WATER_FOOD_COST
-	return DRY_SEASON_CARRY_WATER_FOOD_COST if _has_skill("carry_water") else DRY_SEASON_FOOD_COST
+	var cost := DRY_SEASON_CARRY_WATER_FOOD_COST if _has_skill("carry_water") else DRY_SEASON_FOOD_COST
+	if int(pack["gourd"]) > 0:
+		cost = maxi(DRY_SEASON_WATER_FOOD_COST, cost - 2)
+	return cost
 
 
 func _tick_depleted_tiles(entering_wet: bool) -> void:
@@ -1377,6 +1553,8 @@ func _cancel_active_task(refund := true) -> void:
 		var paid := float(active_task.get("food_paid", 0.0))
 		if paid > 0.0:
 			_change_food(paid)
+		if bool(active_task.get("extra", {}).get("used_tinder", false)):
+			pack["tinder"] = int(pack["tinder"]) + 1
 	active_task.clear()
 	if player_actor["activity"] not in ["idle", "walking"]:
 		player_actor["activity"] = "idle"
@@ -1435,8 +1613,11 @@ func _complete_active_task() -> void:
 		"hunt":
 			var prey := _nearby_huntable_prey()
 			var species_name := str(extra.get("species", "prey"))
+			var used_stone := int(pack["stone"]) > 0
 			var hunt_gain := _hunt_food_gain()
 			if hunt_gain > 0:
+				if used_stone:
+					pack["stone"] = int(pack["stone"]) - 1
 				hunts_completed += 1
 				_change_food(float(hunt_gain))
 				var cooperative := turn >= 25
@@ -1448,10 +1629,11 @@ func _complete_active_task() -> void:
 					species_name = str(prey["species"])
 					prey["pause"] = 0.0
 					_pick_wildlife_goal(prey)
+				var flint_note := " (Flint +6)" if used_stone else ""
 				if cooperative:
-					_event("COOPERATIVE HUNT  /  You coordinate to take a %s. Food +%d, cohesion +%d." % [species_name, hunt_gain, cohesion_delta])
+					_event("COOPERATIVE HUNT  /  You coordinate to take a %s%s. Food +%d, cohesion +%d." % [species_name, flint_note, hunt_gain, cohesion_delta])
 				else:
-					_event("TRACK & HUNT  /  You bring down a %s on the plains. Food +%d, cohesion −1." % [species_name, hunt_gain])
+					_event("TRACK & HUNT  /  You bring down a %s on the plains%s. Food +%d, cohesion −1." % [species_name, flint_note, hunt_gain])
 		"forage":
 			var food_gain := _forage_food_gain(tile)
 			if food_gain > 0:
@@ -1493,10 +1675,13 @@ func _complete_active_task() -> void:
 			_event("EMBER RECOVERED  /%s Knowledge +%d, cohesion +%d." % [carry_note, knowledge_gain, cohesion_gain])
 		"practice":
 			var cost := int(task["food_paid"])
-			var knowledge_gain := mini(15, 99 - knowledge)
+			var used_tinder := bool(extra.get("used_tinder", false))
+			var base_k := 18 if used_tinder else 15
+			var knowledge_gain := mini(base_k, 99 - knowledge)
 			knowledge += knowledge_gain
 			var practice := "You practice skills by the hearth." if str(task["activity"]) == "learning_at_hearth" else "You practice skills."
-			_event("%s Food −%d, knowledge +%d." % [practice, cost, knowledge_gain])
+			var tinder_note := " (Tinder used)" if used_tinder else ""
+			_event("%s%s Food −%d, knowledge +%d." % [practice, tinder_note, cost, knowledge_gain])
 		"share":
 			var band_index := int(extra.get("band_index", 0))
 			band_shares_completed += 1
@@ -1522,10 +1707,14 @@ func _complete_active_task() -> void:
 func _advance_season() -> void:
 	if _run_ended():
 		return
+	var was_dry := turn % 2 == 1
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
 	var next_turn := turn + 1
 	var entering_dry := next_turn % 2 == 1
 	var inland := not world.near_permanent_water(tile)
+	if was_dry and inland and int(pack["gourd"]) > 0:
+		pack["gourd"] = int(pack["gourd"]) - 1
+		_spawn_floating_text("Water Gourd emptied", player_actor["position"], Color("#efd69d"))
 	turn = next_turn
 	adult_age += 1
 	if carried_ember_seasons > 0:
@@ -1533,6 +1722,7 @@ func _advance_season() -> void:
 	_tick_depleted_tiles(not entering_dry)
 	_tick_carcass_sites()
 	_tick_wildfires(entering_dry)
+	_replenish_collectibles(entering_dry, 5)
 	year_bp = max(0, year_bp - 100)
 	var low_food_penalty := LOW_FOOD_COHESION_PENALTY
 	if _has_skill("windbreaks") and (world.terrain_at(tile) == "highland" or tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE):
@@ -1667,6 +1857,8 @@ func _scavenge_food_gain(tile: Vector2i) -> int:
 
 func _hunt_food_gain() -> int:
 	var base := HUNT_COOPERATIVE_FOOD if turn >= 25 else HUNT_BASE_FOOD
+	if int(pack["stone"]) > 0:
+		base += 6
 	return mini(base, 100 - food)
 
 
@@ -1710,9 +1902,12 @@ func _on_learn() -> void:
 	var cost := _practice_food_cost(tile)
 	if not _season_action_blocker().is_empty() or food < cost or knowledge >= 99:
 		return
+	var used_tinder := int(pack["tinder"]) > 0
+	if used_tinder:
+		pack["tinder"] = int(pack["tinder"]) - 1
 	var at_hearth := _has_skill("ember_carrying") or (_has_skill("hearth_keeping") and tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE) or year_bp <= HEARTH_KEEPING_KA
 	_change_food(-float(cost))
-	_start_task("practice", "learning_at_hearth" if at_hearth else "learning", TASK_PRACTICE_DURATION, {"food_paid": float(cost)})
+	_start_task("practice", "learning_at_hearth" if at_hearth else "learning", TASK_PRACTICE_DURATION, {"food_paid": float(cost), "used_tinder": used_tinder})
 
 
 func _on_toggle_skills() -> void:

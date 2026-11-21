@@ -27,7 +27,8 @@ func draw_map(
 	is_dry_season := false,
 	depleted_tiles: Dictionary = {},
 	carcass_sites: Dictionary = {},
-	wildfire_tiles: Dictionary = {}
+	wildfire_tiles: Dictionary = {},
+	collectibles: Dictionary = {}
 ) -> void:
 	var visible: Array[Vector2i] = []
 	var extent := Vector2(WorldMapScript.TILE_W * 0.5, WorldMapScript.TILE_H * 0.5 + 72.0) * zoom_level
@@ -65,6 +66,8 @@ func draw_map(
 			_draw_depleted_mark(canvas, center)
 		if carcass_sites.has(id):
 			_draw_carcass_icon(canvas, center)
+		if collectibles.has(id):
+			_draw_collectible(canvas, collectibles[id])
 	for tile in visible:
 		var id := world.tile_id(tile)
 		if discovered_landmarks.has(id):
@@ -152,6 +155,30 @@ func draw_band_markers(
 			continue
 		canvas.draw_rect(badge, Color("#172421", 0.9))
 		canvas.draw_string(font, badge.position + Vector2(5.0, font.get_ascent(12) + 2.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, tint.lightened(0.4))
+
+
+func draw_floating_texts(
+	canvas: CanvasItem,
+	map_view: Rect2,
+	world_to_screen: Callable,
+	floating_texts: Array[Dictionary]
+) -> void:
+	var font := ThemeDB.fallback_font
+	for item in floating_texts:
+		var age: float = item["age"]
+		var duration: float = item["duration"]
+		var t := clampf(age / duration, 0.0, 1.0)
+		var alpha := 1.0 - smoothstep(0.55, 1.0, t)
+		var screen: Vector2 = world_to_screen.call(item["at"]) + Vector2(0.0, -34.0 - t * 34.0)
+		var text: String = item["text"]
+		var size := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13)
+		var pos := screen - Vector2(size.x * 0.5, 0.0)
+		if not map_view.has_point(screen):
+			continue
+		var color: Color = item["color"]
+		color.a = alpha
+		canvas.draw_rect(Rect2(pos.x - 6.0, pos.y - font.get_ascent(13) - 2.0, size.x + 12.0, size.y + 4.0), Color(0.08, 0.13, 0.12, 0.82 * alpha))
+		canvas.draw_string(font, pos, text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, color)
 
 
 func draw_ellipse_shadow(canvas: CanvasItem, center: Vector2, radius: Vector2, opacity := 0.22) -> void:
@@ -337,6 +364,43 @@ func _draw_wildfire_details(canvas: CanvasItem, center: Vector2, fire_info: Dict
 		for i in range(6):
 			var pt := _vegetation_point(center, x, y, i, 6)
 			_draw_tall_grass(canvas, pt, 0.78, Color("#88bd65"))
+
+
+func _draw_collectible(canvas: CanvasItem, item: Dictionary) -> void:
+	var pt: Vector2 = item["at"]
+	var kind: String = item["kind"]
+	draw_ellipse_shadow(canvas, pt + Vector2(0, 4), Vector2(8.5, 3.2), 0.26)
+	canvas.draw_circle(pt, 9.5, Color(0.95, 0.86, 0.56, 0.16))
+	match kind:
+		"berries":
+			canvas.draw_line(pt + Vector2(-4, 2), pt + Vector2(3, -3), Color("#4f7343"), 1.6, true)
+			canvas.draw_circle(pt + Vector2(-3, -1), 2.7, Color("#d85c49"))
+			canvas.draw_circle(pt + Vector2(2, -3), 2.8, Color("#e89a4a"))
+			canvas.draw_circle(pt + Vector2(3, 2), 2.5, Color("#cf4d42"))
+			canvas.draw_circle(pt + Vector2(1, -4), 0.9, Color("#ffe3b8"))
+		"stone":
+			canvas.draw_colored_polygon(PackedVector2Array([
+				pt + Vector2(-6, 3), pt + Vector2(-3, -5),
+				pt + Vector2(3, -4), pt + Vector2(6, 2), pt + Vector2(1, 5)
+			]), Color("#4d6b73"))
+			canvas.draw_line(pt + Vector2(-2, -3), pt + Vector2(3, 1), Color("#c2ded6", 0.9), 1.3, true)
+		"gourd":
+			canvas.draw_circle(pt + Vector2(0, 1), 5.0, Color("#dec796"))
+			canvas.draw_circle(pt + Vector2(0, -4), 2.4, Color("#c7ab76"))
+			canvas.draw_arc(pt + Vector2(0, 1), 5.0, 0.0, TAU, 14, Color("#8f7245"), 1.0, true)
+			canvas.draw_circle(pt + Vector2(-1.8, -0.5), 1.3, Color("#f7ecd0", 0.85))
+		"ochre":
+			canvas.draw_colored_polygon(PackedVector2Array([
+				pt + Vector2(-5, 3), pt + Vector2(-4, -3),
+				pt + Vector2(1, -5), pt + Vector2(6, -1), pt + Vector2(4, 4)
+			]), Color("#c75338"))
+			canvas.draw_circle(pt + Vector2(-1, -2), 1.8, Color("#ec8d67"))
+			canvas.draw_circle(pt + Vector2(2, 1), 1.3, Color("#f3b88c"))
+		"tinder":
+			canvas.draw_line(pt + Vector2(-6, 3), pt + Vector2(5, -3), Color("#9d7340"), 2.0, true)
+			canvas.draw_line(pt + Vector2(-5, -2), pt + Vector2(6, 3), Color("#b9894b"), 2.0, true)
+			canvas.draw_circle(pt + Vector2(0, 0), 2.5, Color("#f0be5b"))
+			canvas.draw_circle(pt + Vector2(-0.6, -0.8), 1.0, Color("#fff0b5"))
 
 
 func _draw_landmark_icon(canvas: CanvasItem, center: Vector2, kind: String, is_dry_season := false) -> void:
