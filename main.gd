@@ -2,13 +2,17 @@ extends Node2D
 
 const W := 1440.0
 const H := 900.0
-const PLAYER_SPEED := 56.0
-const TRAVEL_ACCELERATION := 240.0
+const PLAYER_SPEED := 64.0
+const TRAIL_READING_SPEED_BONUS := 12.0
+const ERECTUS_SPEED_BONUS := 16.0
+const AGING_SPEED_PENALTY := 8.0
+const TRAVEL_ACCELERATION := 260.0
 const PLAYER_COUNT := 1
 const NEIGHBOR_BAND_SIZE := 3
 const BAND_FADE_IN := 0.5
 const BAND_FADE_OUT := 0.85
 const CHRONICLE_TURNS := 32
+const SEASON_DURATION := 28.0
 const POSSIBLE_FIRE_USE_KA := 2000
 const HEARTH_KEEPING_KA := 1000
 const WET_SEASON_FOOD_COST := 6
@@ -28,12 +32,18 @@ const SHARE_CAMP_FOOD_COST := 4
 const SHARE_CAMP_COOLDOWN := 4
 const BASE_SCOUT_RADIUS := 4
 const TRAIL_READING_SCOUT_RADIUS := 5
-const BASE_TRAVEL_RANGE := 7
-const TRAIL_READING_TRAVEL_BONUS := 2
-const ERECTUS_TRAVEL_BONUS := 3
 const BASE_PRACTICE_FOOD_COST := 8
 const HEARTH_PRACTICE_FOOD_COST := 4
 const EMBER_PRACTICE_FOOD_COST := 6
+const TASK_FORAGE_DURATION := 2.2
+const TASK_SCAVENGE_DURATION := 2.2
+const TASK_HUNT_DURATION := 2.6
+const TASK_SCOUT_DURATION := 2.4
+const TASK_PRACTICE_DURATION := 3.2
+const TASK_EMBER_DURATION := 2.4
+const TASK_SHARE_DURATION := 2.4
+const TASK_MATE_DURATION := 2.6
+const TASK_KINSHIP_DURATION := 3.0
 const WET_WATERHOLE_FORAGE := 18
 const PREDATOR_DANGER_RANGE := 50.0
 const PREDATOR_COOLDOWN_SECS := 8.0
@@ -75,19 +85,22 @@ var world: WORLD_MAP_SCRIPT = WORLD_MAP_SCRIPT.new()
 var map_renderer: MAP_RENDERER_SCRIPT
 
 var turn := 0
+var season_elapsed := 0.0
+var paused := false
+var time_scale := 1.0
 var generation := 1
 var adult_age := 0
 var aging_warned := false
 var succession_turn := -1
-var season_action_used := false
 var kinship_recorded := false
 var lineage_ended := false
 var starvation_warned := false
 var year_bp := 3200
 var food := 68
+var food_f := 68.0
 var knowledge := 12
 var cohesion := 57
-var moves_remaining := BASE_TRAVEL_RANGE
+var active_task: Dictionary = {}
 var discovered: Array[int] = [0]
 var learned_skills: Dictionary = {}
 var discovered_landmark_names: Dictionary = {}
@@ -120,6 +133,11 @@ var skills_button: Button
 var kinship_button: Button
 var mate_button: Button
 var advance_button: Button
+var season_bar_bg: ColorRect
+var season_bar_fill: ColorRect
+var season_bar_label: Label
+var pause_button: Button
+var speed_button: Button
 var toast_label: Label
 var skills_overlay: Control
 var skills_header_label: Label
@@ -172,9 +190,53 @@ func _ready() -> void:
 	_check_band_encounters()
 
 
+func _is_sim_paused() -> bool:
+	if paused or _run_ended():
+		return true
+	if is_instance_valid(skills_overlay) and skills_overlay.visible:
+		return true
+	if is_instance_valid(summary_overlay) and summary_overlay.visible:
+		return true
+	return false
+
+
+func _player_speed() -> float:
+	var speed := PLAYER_SPEED
+	if _has_skill("trail_reading"):
+		speed += TRAIL_READING_SPEED_BONUS
+	if turn >= 13:
+		speed += ERECTUS_SPEED_BONUS
+	if adult_age >= AGING_RANGE_PENALTY_AGE:
+		speed = maxf(44.0, speed - AGING_SPEED_PENALTY)
+	return speed
+
+
+func _set_food(value: float) -> void:
+	food_f = clampf(value, 0.0, 100.0)
+	food = int(floorf(food_f + 0.0001))
+
+
+func _change_food(delta_amount: float) -> void:
+	if absf(food_f - float(food)) >= 1.0:
+		food_f = float(food)
+	_set_food(food_f + delta_amount)
+
+
 func _process(delta: float) -> void:
-	_continue_keyboard_movement(delta)
-	var moved := _update_actor(player_actor, delta, PLAYER_SPEED)
+	if toast_timer > 0:
+		toast_timer -= delta
+		if toast_timer <= 0 and is_instance_valid(toast_label):
+			toast_label.hide()
+	var sim_paused := _is_sim_paused()
+	for animal in wildlife:
+		var model: Node = animal["model"]
+		if is_instance_valid(model):
+			model.set_process(not sim_paused)
+	if sim_paused:
+		return
+	var sim_delta := delta * time_scale
+	_continue_keyboard_movement(sim_delta)
+	var moved := _update_actor(player_actor, sim_delta, _player_speed())
 	var previous_camera_offset := camera_offset
 	if moved and not camera_dragging:
 		_follow_player_camera()
@@ -189,34 +251,53 @@ func _process(delta: float) -> void:
 	var bands_moved := false
 	var bands_need_redraw := false
 	for band in ai_bands:
-		var band_moved := _update_ai_band(band, delta)
+		var band_moved := _update_ai_band(band, sim_delta)
 		bands_moved = bands_moved or band_moved
-		var presence_changed := _update_band_presence(band, delta)
+		var presence_changed := _update_band_presence(band, sim_delta)
 		if (presence_changed or (band_moved and band["on_charted_land"])) and band["last_seen"] != null:
 			if MAP_VIEW.grow(70.0 * zoom_level).has_point(_world_to_screen(band["last_seen"])):
 				bands_need_redraw = true
 	_check_band_encounters()
-	if moved or bands_moved:
-		_refresh_action_label()
-	_sync_hominin_models(delta)
-	var wildlife_changed := _update_wildlife(delta)
+	_sync_hominin_models(sim_delta)
+	var wildlife_changed := _update_wildlife(sim_delta)
 	_check_predator_encounters()
-	if moved or wildlife_changed:
+	var task_changed := _update_active_task(sim_delta)
+	_advance_clock(sim_delta)
+	if moved or bands_moved or wildlife_changed:
 		_refresh_action_label()
-	if wildlife_changed or moved or bands_need_redraw:
+	if wildlife_changed or moved or bands_need_redraw or task_changed:
 		queue_redraw()
-	if toast_timer > 0:
-		toast_timer -= delta
-		if toast_timer <= 0 and is_instance_valid(toast_label):
-			toast_label.hide()
 	var action_time := float(player_actor.get("action_time", 0.0))
-	if action_time > 0.0:
-		action_time = maxf(0.0, action_time - delta)
+	if action_time > 0.0 and active_task.is_empty():
+		action_time = maxf(0.0, action_time - sim_delta)
 		player_actor["action_time"] = action_time
 		if action_time == 0.0 and player_actor["activity"] not in ["idle", "walking"]:
 			player_actor["activity"] = "idle"
 			_refresh_action_label()
 			queue_redraw()
+
+
+func _advance_clock(sim_delta: float) -> void:
+	if _run_ended():
+		return
+	var tile: Vector2i = world.tile_from_world(player_actor["position"])
+	var prev_food := food
+	var season_cost := float(_season_food_cost(tile, turn))
+	_change_food(-season_cost * (sim_delta / SEASON_DURATION))
+	if food == 0 and not starvation_warned:
+		starvation_warned = true
+		_event("STORES EMPTY  /  Without food, cohesion will drop rapidly (%d) at season's end. Forage soon!" % STARVATION_COHESION_PENALTY)
+	elif food > 0:
+		starvation_warned = false
+	if food != prev_food:
+		_refresh_stats_bar()
+		_refresh_action_label()
+	season_elapsed += sim_delta
+	if season_elapsed >= SEASON_DURATION:
+		season_elapsed -= SEASON_DURATION
+		_advance_season()
+	else:
+		_refresh_season_bar(tile)
 
 
 func _reveal_around(center: Vector2i, radius: int) -> bool:
@@ -249,7 +330,7 @@ func _discover_landmark(tile: Vector2i) -> void:
 	var food_gain := int(landmark["food"])
 	var knowledge_gain := int(landmark["knowledge"])
 	var cohesion_gain := int(landmark["cohesion"])
-	food = mini(100, food + food_gain)
+	_change_food(float(food_gain))
 	knowledge = mini(99, knowledge + knowledge_gain)
 	cohesion = mini(100, cohesion + cohesion_gain)
 	if food_gain > 0:
@@ -307,22 +388,15 @@ func _make_ai_band(label: String, start: Vector2i, goals: Array, color: Color, p
 	return actor
 
 
-func _route_actor_to(actor: Dictionary, tile: Vector2i, direct := false, max_steps := -1) -> bool:
+func _route_actor_to(actor: Dictionary, tile: Vector2i, direct := false) -> bool:
 	var origin: Vector2 = actor["target"]
 	var result: Dictionary = world.find_route(origin, tile, direct)
 	if not result["ok"]:
 		return false
 	var route: Array = result["route"]
-	if max_steps >= 0:
-		if max_steps == 0 or route.is_empty():
-			return false
-		if route.size() > max_steps:
-			route.resize(max_steps)
 	actor["route"] = route
 	if actor["position"] == origin and not route.is_empty():
 		actor["target"] = route.pop_front()
-		if actor["is_player"]:
-			moves_remaining = maxi(0, moves_remaining - 1)
 	return true
 
 
@@ -349,19 +423,9 @@ func _update_actor(actor: Dictionary, delta: float, speed: float) -> bool:
 			return step > 0.0
 	actor["position"] = target
 	if not route.is_empty():
-		if actor["is_player"]:
-			if moves_remaining <= 0:
-				route.clear()
-			else:
-				actor["target"] = route.pop_front()
-				moves_remaining = maxi(0, moves_remaining - 1)
-				actor["moving"] = true
-				_refresh_action_label()
-				return true
-		else:
-			actor["target"] = route.pop_front()
-			actor["moving"] = true
-			return true
+		actor["target"] = route.pop_front()
+		actor["moving"] = true
+		return true
 	actor["moving"] = false
 	actor["travel_speed"] = 0.0
 	if actor["is_player"] and actor["activity"] == "walking":
@@ -756,11 +820,12 @@ func _check_predator_encounters() -> void:
 			cohesion = mini(100, cohesion + 2)
 			_event("PREDATOR DETERRED  /  Glowing embers drive off a stalking %s. Cohesion +2." % pred_name)
 		elif _has_skill("stone_flaking"):
-			food = maxi(0, food - 2)
+			_change_food(-2.0)
 			cohesion = mini(100, cohesion + 1)
 			_event("PREDATOR HELD OFF  /  Flaked stones and shouts keep a %s at bay. Food −2, cohesion +1." % pred_name)
 		else:
-			food = maxi(0, food - 6)
+			_cancel_active_task(true)
+			_change_food(-6.0)
 			cohesion = maxi(0, cohesion - 5)
 			_event("PREDATOR AMBUSH  /  A %s lunges from cover! You escape shaken. Food −6, cohesion −5." % pred_name)
 			if cohesion == 0:
@@ -854,7 +919,10 @@ func _draw() -> void:
 	if is_instance_valid(hominin_viewport):
 		draw_texture_rect(hominin_viewport.get_texture(), MAP_VIEW, false)
 	draw_set_transform(_map_draw_origin(), 0.0, Vector2.ONE * zoom_level)
-	map_renderer.draw_player_marker(self, MAP_VIEW, _world_to_screen, player_actor, ai_bands)
+	var task_progress := -1.0
+	if not active_task.is_empty() and float(active_task["duration"]) > 0.0:
+		task_progress = float(active_task["elapsed"]) / float(active_task["duration"])
+	map_renderer.draw_player_marker(self, MAP_VIEW, _world_to_screen, player_actor, ai_bands, task_progress)
 	draw_set_transform(Vector2.ZERO)
 	map_renderer.draw_band_markers(self, MAP_VIEW, zoom_level, _world_to_screen, ai_bands)
 	draw_string(ThemeDB.fallback_font, Vector2(18.0, 94.0), _wildlife_caption(), HORIZONTAL_ALIGNMENT_LEFT, 790.0, 12, Color("#f0dfb8"))
@@ -957,7 +1025,16 @@ func _build_ui() -> void:
 	skills_button = _button(root, "Skills", Rect2(614, 841, 88, 46), Color("#465662"), _on_toggle_skills)
 	kinship_button = _button(root, "Meet kin", Rect2(708, 841, 98, 46), Color("#684d54"), _on_encounter)
 	mate_button = _button(root, "Find mate", Rect2(812, 841, 98, 46), Color("#684d54"), _on_mate)
-	advance_button = _button(root, "PASS THE SEASON  ›", Rect2(920, 841, 256, 46), Color("#b88d56"), _on_advance)
+	season_bar_bg = _panel(root, Rect2(920, 839, 256, 20), Color("#131f1c"), Color("#657767"))
+	season_bar_fill = _panel(root, Rect2(921, 840, 0, 18), Color("#4b8378"))
+	season_bar_label = _label(root, "", Rect2(920, 838, 256, 22), 7, Color("#f4ecd8"), true)
+	season_bar_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pause_button = _button(root, "Pause (Space)", Rect2(920, 863, 152, 26), Color("#465662"), _on_toggle_pause)
+	pause_button.add_theme_font_size_override("font_size", 13)
+	speed_button = _button(root, "Speed 1×", Rect2(1078, 863, 98, 26), Color("#465662"), _on_toggle_speed)
+	speed_button.add_theme_font_size_override("font_size", 13)
+	advance_button = _button(root, "NEW CHRONICLE  ›", Rect2(920, 841, 256, 46), Color("#b88d56"), _on_restart_chronicle)
+	advance_button.hide()
 	toast_label = _label(root, "", Rect2(260, 80, 670, 42), 12, Color("#f1d7a5"), true)
 	toast_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	toast_label.hide()
@@ -1173,17 +1250,6 @@ func _scout_radius() -> int:
 	return TRAIL_READING_SCOUT_RADIUS if _has_skill("trail_reading") else BASE_SCOUT_RADIUS
 
 
-func _max_travel_range() -> int:
-	var limit := BASE_TRAVEL_RANGE
-	if _has_skill("trail_reading"):
-		limit += TRAIL_READING_TRAVEL_BONUS
-	if turn >= 13:
-		limit += ERECTUS_TRAVEL_BONUS
-	if adult_age >= AGING_RANGE_PENALTY_AGE:
-		limit = maxi(4, limit - 1)
-	return limit
-
-
 func _practice_food_cost(tile: Vector2i) -> int:
 	if _has_skill("hearth_keeping") and tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE:
 		return HEARTH_PRACTICE_FOOD_COST
@@ -1283,19 +1349,184 @@ func _run_ended() -> bool:
 	return lineage_ended or turn >= CHRONICLE_TURNS
 
 
-func _on_advance() -> void:
+func _on_toggle_pause() -> void:
 	if _run_ended():
-		get_tree().reload_current_scene()
 		return
-	if player_actor["position"] != player_actor["target"]:
+	paused = not paused
+	_refresh_action_label()
+
+
+func _on_toggle_speed() -> void:
+	if _run_ended():
+		return
+	time_scale = 2.0 if time_scale < 1.5 else 1.0
+	_refresh_action_label()
+
+
+func _set_speed(value: float) -> void:
+	if _run_ended():
+		return
+	time_scale = value
+	_refresh_action_label()
+
+
+func _cancel_active_task(refund := true) -> void:
+	if active_task.is_empty():
+		return
+	if refund:
+		var paid := float(active_task.get("food_paid", 0.0))
+		if paid > 0.0:
+			_change_food(paid)
+	active_task.clear()
+	if player_actor["activity"] not in ["idle", "walking"]:
+		player_actor["activity"] = "idle"
+		player_actor["action_time"] = 0.0
+	_refresh_ui()
+	queue_redraw()
+
+
+func _start_task(kind: String, activity: String, duration: float, extra: Dictionary = {}) -> void:
+	movement_key = KEY_NONE
+	active_task = {
+		"kind": kind,
+		"activity": activity,
+		"duration": duration,
+		"elapsed": 0.0,
+		"tile": world.tile_from_world(player_actor["position"]),
+		"food_paid": float(extra.get("food_paid", 0.0)),
+		"extra": extra
+	}
+	player_actor["activity"] = activity
+	player_actor["action_time"] = duration
+	_refresh_ui()
+	queue_redraw()
+
+
+func _update_active_task(sim_delta: float) -> bool:
+	if active_task.is_empty():
+		return false
+	active_task["elapsed"] = float(active_task["elapsed"]) + sim_delta
+	if float(active_task["elapsed"]) >= float(active_task["duration"]):
+		_complete_active_task()
+	return true
+
+
+func _complete_active_task() -> void:
+	var task := active_task.duplicate(true)
+	active_task.clear()
+	player_actor["activity"] = "idle"
+	player_actor["action_time"] = 0.0
+	var tile: Vector2i = task["tile"]
+	var tile_id: int = world.tile_id(tile)
+	var extra: Dictionary = task["extra"]
+	match str(task["kind"]):
+		"scavenge":
+			if carcass_sites.has(tile_id):
+				var scavenge_gain := _scavenge_food_gain(tile)
+				var cohesion_gain := mini(2, 100 - cohesion)
+				carcass_sites.erase(tile_id)
+				scavenges_completed += 1
+				_change_food(float(scavenge_gain))
+				cohesion += cohesion_gain
+				if food > 0:
+					starvation_warned = false
+				var marrow := " and cracked marrow" if _has_skill("stone_flaking") else ""
+				_event("SCAVENGE  /  You recover meat%s from a predator kill. Food +%d, cohesion +%d." % [marrow, scavenge_gain, cohesion_gain])
+		"hunt":
+			var prey := _nearby_huntable_prey()
+			var species_name := str(extra.get("species", "prey"))
+			var hunt_gain := _hunt_food_gain()
+			if hunt_gain > 0:
+				hunts_completed += 1
+				_change_food(float(hunt_gain))
+				var cooperative := turn >= 25
+				var cohesion_delta := mini(3, 100 - cohesion) if cooperative else -1
+				cohesion = clampi(cohesion + cohesion_delta, 0, 100)
+				if food > 0:
+					starvation_warned = false
+				if not prey.is_empty():
+					species_name = str(prey["species"])
+					prey["pause"] = 0.0
+					_pick_wildlife_goal(prey)
+				if cooperative:
+					_event("COOPERATIVE HUNT  /  You coordinate to take a %s. Food +%d, cohesion +%d." % [species_name, hunt_gain, cohesion_delta])
+				else:
+					_event("TRACK & HUNT  /  You bring down a %s on the plains. Food +%d, cohesion −1." % [species_name, hunt_gain])
+		"forage":
+			var food_gain := _forage_food_gain(tile)
+			if food_gain > 0:
+				var cohesion_gain := mini(2, 100 - cohesion)
+				var fire_info: Dictionary = wildfire_tiles.get(tile_id, {})
+				var fire_state: String = fire_info.get("state", "")
+				var burn_forage: bool = fire_state == "cooled" and not bool(fire_info.get("foraged", false))
+				if burn_forage:
+					fire_info["foraged"] = true
+				depleted_tiles[tile_id] = 1 if tile in WORLD_MAP_SCRIPT.SPRING_TILES else 2
+				_change_food(float(food_gain))
+				cohesion += cohesion_gain
+				if food > 0:
+					starvation_warned = false
+				if burn_forage:
+					_event("BURN SCAR FORAGE  /  You gather exposed roots, seeds, and insects from cooled ash. Food +%d, cohesion +%d." % [food_gain, cohesion_gain])
+				elif fire_state == "regrowth":
+					_event("REGROWTH FORAGE  /  Fresh green shoots rise from the ash. Food +%d, cohesion +%d." % [food_gain, cohesion_gain])
+				else:
+					var site := "at the spring" if tile in WORLD_MAP_SCRIPT.SPRING_TILES else ("at the waterhole" if tile == WORLD_MAP_SCRIPT.SEASONAL_WATERHOLE_TILE else "in %s" % world.terrain_at(tile))
+					_event("You forage %s. Food +%d, cohesion +%d." % [site, food_gain, cohesion_gain])
+		"scout":
+			var new_tiles := _unmapped_scout_tiles(tile)
+			_reveal_around(tile, _scout_radius())
+			_position_wildlife_models()
+			var knowledge_gain := mini(9, 99 - knowledge)
+			knowledge += knowledge_gain
+			_event("You chart %d new tiles. Knowledge +%d." % [new_tiles, knowledge_gain])
+		"ember":
+			if wildfire_tiles.has(tile_id):
+				wildfire_tiles[tile_id]["ember_taken"] = true
+			var knowledge_gain := mini(12, 99 - knowledge)
+			var cohesion_gain := mini(4 if _has_skill("ember_carrying") else 2, 100 - cohesion)
+			knowledge += knowledge_gain
+			cohesion += cohesion_gain
+			if _has_skill("ember_carrying"):
+				carried_ember_seasons = 4
+			var carry_note := " You pack live coals to carry away from the burn." if _has_skill("ember_carrying") else " You tend a glowing coal from the ash."
+			_event("EMBER RECOVERED  /%s Knowledge +%d, cohesion +%d." % [carry_note, knowledge_gain, cohesion_gain])
+		"practice":
+			var cost := int(task["food_paid"])
+			var knowledge_gain := mini(15, 99 - knowledge)
+			knowledge += knowledge_gain
+			var practice := "You practice skills by the hearth." if str(task["activity"]) == "learning_at_hearth" else "You practice skills."
+			_event("%s Food −%d, knowledge +%d." % [practice, cost, knowledge_gain])
+		"share":
+			var band_index := int(extra.get("band_index", 0))
+			band_shares_completed += 1
+			band_share_ready_turn[band_index] = turn + SHARE_CAMP_COOLDOWN
+			var knowledge_gain := mini(6, 99 - knowledge)
+			var cohesion_gain := mini(4, 100 - cohesion)
+			knowledge += knowledge_gain
+			cohesion += cohesion_gain
+			var band_name: String = ai_bands[band_index]["label"] if band_index < ai_bands.size() else "Neighbors"
+			_event("SHARED CAMP  /  %s trade trails and stories. Food −%d, knowledge +%d, cohesion +%d. %s" % [band_name, SHARE_CAMP_FOOD_COST, knowledge_gain, cohesion_gain, _nearest_undiscovered_landmark_hint()])
+		"kinship":
+			kinship_recorded = true
+			var cohesion_gain := mini(6, 100 - cohesion)
+			cohesion += cohesion_gain
+			_event("NEANDERTHAL MEETING  /  Two human groups share a refuge. Food −5, cohesion +%d. Shared descendants recorded." % cohesion_gain)
+		"mate":
+			succession_turn = turn + SUCCESSION_SEASONS
+			_event("PAIRING  /  You form a pair with an adult from a neighboring band. Food −%d. Your offspring takes over in %d seasons." % [MATING_FOOD_COST, SUCCESSION_SEASONS])
+	_refresh_ui()
+	queue_redraw()
+
+
+func _advance_season() -> void:
+	if _run_ended():
 		return
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
 	var next_turn := turn + 1
 	var entering_dry := next_turn % 2 == 1
 	var inland := not world.near_permanent_water(tile)
-	var food_cost := _season_food_cost(tile, next_turn)
 	turn = next_turn
-	season_action_used = false
 	adult_age += 1
 	if carried_ember_seasons > 0:
 		carried_ember_seasons -= 1
@@ -1303,7 +1534,6 @@ func _on_advance() -> void:
 	_tick_carcass_sites()
 	_tick_wildfires(entering_dry)
 	year_bp = max(0, year_bp - 100)
-	food = maxi(0, food - food_cost)
 	var low_food_penalty := LOW_FOOD_COHESION_PENALTY
 	if _has_skill("windbreaks") and (world.terrain_at(tile) == "highland" or tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE):
 		low_food_penalty = WINDBREAKS_LOW_FOOD_COHESION_PENALTY
@@ -1319,11 +1549,11 @@ func _on_advance() -> void:
 		if not aging_warned:
 			aging_warned = true
 			_event("AGING GENERATION  /  Without an heir stepping forward, your aging adult strains to hold the band together (−2 cohesion/season). Pair with a neighboring band.")
-	moves_remaining = _max_travel_range()
 	if food > 0:
 		starvation_warned = false
 	if cohesion == 0:
 		lineage_ended = true
+		_cancel_active_task(false)
 		movement_key = KEY_NONE
 		player_actor["route"] = []
 		_event("LINEAGE LOST  /  Without enough food and cohesion, your band scatters across the Rift Valley.")
@@ -1336,7 +1566,7 @@ func _on_advance() -> void:
 		starvation_warned = true
 		_event("STORES EMPTY  /  Without food, cohesion drops rapidly (%d per season). Forage soon before your band scatters." % STARVATION_COHESION_PENALTY)
 	if turn == 1:
-		_event("Dry season tests your range. Tracks lead toward a river.")
+		_event("Dry season arrives. Stay near rivers, lakes, or springs to conserve food.")
 	if turn == 2:
 		_event("Stone flakes outlast the meal. A new way of making tools spreads.")
 	if turn == 3:
@@ -1349,7 +1579,7 @@ func _on_advance() -> void:
 		_event("Homo habilis appears in the Rift Valley. Stone tools become part of the story.")
 	if turn == 13 and not discovered.has(3):
 		discovered.append(3)
-		_event("Homo erectus emerges. Longer legs carry one human lineage beyond Africa (+3 seasonal travel range).")
+		_event("Homo erectus emerges. Longer legs carry one human lineage swiftly across the valley.")
 	if year_bp == POSSIBLE_FIRE_USE_KA:
 		_event("POSSIBLE EARLY FIRE USE  /  Early humans may have used fire around this time. The evidence is uncertain.")
 	if year_bp == HEARTH_KEEPING_KA:
@@ -1369,6 +1599,7 @@ func _on_advance() -> void:
 	if turn == 30:
 		_event("Across Eurasia, human groups meet repeatedly. Shared ancestry carries between branches.")
 	if turn == CHRONICLE_TURNS:
+		_cancel_active_task(false)
 		_event("The chronicle reaches the present. Many branches end; traces of kinship remain.")
 	_refresh_ui()
 	if turn == CHRONICLE_TURNS:
@@ -1382,8 +1613,8 @@ func _season_action_blocker() -> String:
 		return "Your lineage has scattered. Start a new chronicle."
 	if turn >= CHRONICLE_TURNS:
 		return "The chronicle is complete."
-	if season_action_used:
-		return "You have acted. Pass the season to act again."
+	if not active_task.is_empty():
+		return "Busy — finish or move to cancel your current action."
 	if player_actor["position"] != player_actor["target"]:
 		return "Wait until you reach your destination."
 	return ""
@@ -1445,89 +1676,28 @@ func _on_gather() -> void:
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
 	var tile_id: int = world.tile_id(tile)
 	if carcass_sites.has(tile_id):
-		var scavenge_gain := _scavenge_food_gain(tile)
-		if scavenge_gain == 0:
+		if _scavenge_food_gain(tile) == 0:
 			return
-		var cohesion_gain := mini(2, 100 - cohesion)
-		season_action_used = true
-		carcass_sites.erase(tile_id)
-		scavenges_completed += 1
-		_start_player_activity("scavenging", 3.0)
-		food += scavenge_gain
-		cohesion += cohesion_gain
-		if food > 0:
-			starvation_warned = false
-		var marrow := " and cracked marrow" if _has_skill("stone_flaking") else ""
-		_event("SCAVENGE  /  You recover meat%s from a predator kill. Food +%d, cohesion +%d." % [marrow, scavenge_gain, cohesion_gain])
-		_refresh_ui()
-		queue_redraw()
+		_start_task("scavenge", "scavenging", TASK_SCAVENGE_DURATION)
 		return
 	var prey := _nearby_huntable_prey()
 	if not prey.is_empty():
-		var hunt_gain := _hunt_food_gain()
-		if hunt_gain == 0:
+		if _hunt_food_gain() == 0:
 			return
-		season_action_used = true
-		hunts_completed += 1
-		_start_player_activity("hunting", 3.0)
-		food += hunt_gain
-		var cooperative := turn >= 25
-		var cohesion_delta := mini(3, 100 - cohesion) if cooperative else -1
-		cohesion = clampi(cohesion + cohesion_delta, 0, 100)
-		if food > 0:
-			starvation_warned = false
-		var species_name: String = prey["species"]
-		prey["pause"] = 0.0
-		_pick_wildlife_goal(prey)
-		if cooperative:
-			_event("COOPERATIVE HUNT  /  You coordinate to take a %s. Food +%d, cohesion +%d." % [species_name, hunt_gain, cohesion_delta])
-		else:
-			_event("TRACK & HUNT  /  You bring down a %s on the plains. Food +%d, cohesion −1." % [species_name, hunt_gain])
-		_refresh_ui()
-		queue_redraw()
+		_start_task("hunt", "hunting", TASK_HUNT_DURATION, {"species": str(prey["species"])})
 		return
-	var food_gain := _forage_food_gain(tile)
-	if food_gain == 0:
+	if _forage_food_gain(tile) == 0:
 		return
-	var cohesion_gain := mini(2, 100 - cohesion)
-	season_action_used = true
-	var fire_info: Dictionary = wildfire_tiles.get(tile_id, {})
-	var fire_state: String = fire_info.get("state", "")
-	var burn_forage: bool = fire_state == "cooled" and not bool(fire_info.get("foraged", false))
-	if burn_forage:
-		fire_info["foraged"] = true
-	depleted_tiles[tile_id] = 1 if tile in WORLD_MAP_SCRIPT.SPRING_TILES else 2
-	_start_player_activity("gathering", 3.0)
-	food += food_gain
-	cohesion += cohesion_gain
-	if food > 0:
-		starvation_warned = false
-	if burn_forage:
-		_event("BURN SCAR FORAGE  /  You gather exposed roots, seeds, and insects from cooled ash. Food +%d, cohesion +%d." % [food_gain, cohesion_gain])
-	elif fire_state == "regrowth":
-		_event("REGROWTH FORAGE  /  Fresh green shoots rise from the ash. Food +%d, cohesion +%d." % [food_gain, cohesion_gain])
-	else:
-		var site := "at the spring" if tile in WORLD_MAP_SCRIPT.SPRING_TILES else ("at the waterhole" if tile == WORLD_MAP_SCRIPT.SEASONAL_WATERHOLE_TILE else "in %s" % world.terrain_at(tile))
-		_event("You forage %s. Food +%d, cohesion +%d." % [site, food_gain, cohesion_gain])
-	_refresh_ui()
-	queue_redraw()
+	_start_task("forage", "gathering", TASK_FORAGE_DURATION)
 
 
 func _on_explore() -> void:
 	if not _season_action_blocker().is_empty():
 		return
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
-	var new_tiles := _unmapped_scout_tiles(tile)
-	if new_tiles == 0:
+	if _unmapped_scout_tiles(tile) == 0:
 		return
-	season_action_used = true
-	_start_player_activity("scouting", 3.0)
-	_reveal_around(tile, _scout_radius())
-	_position_wildlife_models()
-	var knowledge_gain := mini(9, 99 - knowledge)
-	knowledge += knowledge_gain
-	_event("You chart %d new tiles. Knowledge +%d." % [new_tiles, knowledge_gain])
-	_refresh_ui()
+	_start_task("scout", "scouting", TASK_SCOUT_DURATION)
 
 
 func _on_learn() -> void:
@@ -1535,33 +1705,14 @@ func _on_learn() -> void:
 	if _can_recover_ember(tile):
 		if not _season_action_blocker().is_empty():
 			return
-		season_action_used = true
-		var tile_id: int = world.tile_id(tile)
-		wildfire_tiles[tile_id]["ember_taken"] = true
-		var knowledge_gain := mini(12, 99 - knowledge)
-		var cohesion_gain := mini(4 if _has_skill("ember_carrying") else 2, 100 - cohesion)
-		knowledge += knowledge_gain
-		cohesion += cohesion_gain
-		if _has_skill("ember_carrying"):
-			carried_ember_seasons = 4
-		_start_player_activity("learning_at_hearth", 3.0)
-		var carry_note := " You pack live coals to carry away from the burn." if _has_skill("ember_carrying") else " You tend a glowing coal from the ash."
-		_event("EMBER RECOVERED  /%s Knowledge +%d, cohesion +%d." % [carry_note, knowledge_gain, cohesion_gain])
-		_refresh_ui()
-		queue_redraw()
+		_start_task("ember", "learning_at_hearth", TASK_EMBER_DURATION)
 		return
 	var cost := _practice_food_cost(tile)
 	if not _season_action_blocker().is_empty() or food < cost or knowledge >= 99:
 		return
-	season_action_used = true
 	var at_hearth := _has_skill("ember_carrying") or (_has_skill("hearth_keeping") and tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE) or year_bp <= HEARTH_KEEPING_KA
-	_start_player_activity("learning_at_hearth" if at_hearth else "learning", 3.0)
-	var knowledge_gain := mini(15, 99 - knowledge)
-	food -= cost
-	knowledge += knowledge_gain
-	var practice := "You practice skills by the hearth." if at_hearth else "You practice skills."
-	_event("%s Food −%d, knowledge +%d." % [practice, cost, knowledge_gain])
-	_refresh_ui()
+	_change_food(-float(cost))
+	_start_task("practice", "learning_at_hearth" if at_hearth else "learning", TASK_PRACTICE_DURATION, {"food_paid": float(cost)})
 
 
 func _on_toggle_skills() -> void:
@@ -1580,14 +1731,11 @@ func _on_learn_skill(skill_id: String) -> void:
 	var blocker: String = TECH_TREE_SCRIPT.can_learn(skill, learned_skills, discovered_landmark_names, turn, knowledge, _season_action_blocker())
 	if not blocker.is_empty():
 		return
-	season_action_used = true
 	knowledge -= int(skill["cost"])
 	learned_skills[skill_id] = true
 	if skill_id == "hide_working":
 		hide_wrap_unlocked = true
-	elif skill_id == "trail_reading":
-		moves_remaining += TRAIL_READING_TRAVEL_BONUS
-	_start_player_activity("learning_at_hearth" if skill_id in ["hearth_keeping", "ember_carrying"] else "learning", 3.0)
+	_start_player_activity("learning_at_hearth" if skill_id in ["hearth_keeping", "ember_carrying"] else "learning", 1.8)
 	_event(str(skill["chronicle"]))
 	_refresh_ui()
 	_sync_hominin_models()
@@ -1635,29 +1783,13 @@ func _on_encounter() -> void:
 		if not _share_camp_blocker().is_empty():
 			return
 		var band_index := _nearby_shareable_band()
-		season_action_used = true
-		band_shares_completed += 1
-		band_share_ready_turn[band_index] = turn + SHARE_CAMP_COOLDOWN
-		_start_player_activity("meeting", 3.5)
-		food -= SHARE_CAMP_FOOD_COST
-		var knowledge_gain := mini(6, 99 - knowledge)
-		var cohesion_gain := mini(4, 100 - cohesion)
-		knowledge += knowledge_gain
-		cohesion += cohesion_gain
-		var band_name: String = ai_bands[band_index]["label"]
-		_event("SHARED CAMP  /  %s trade trails and stories. Food −%d, knowledge +%d, cohesion +%d. %s" % [band_name, SHARE_CAMP_FOOD_COST, knowledge_gain, cohesion_gain, _nearest_undiscovered_landmark_hint()])
-		_refresh_ui()
+		_change_food(-float(SHARE_CAMP_FOOD_COST))
+		_start_task("share", "meeting", TASK_SHARE_DURATION, {"food_paid": float(SHARE_CAMP_FOOD_COST), "band_index": band_index})
 		return
 	if not _kinship_blocker().is_empty():
 		return
-	season_action_used = true
-	kinship_recorded = true
-	_start_player_activity("meeting", 4.0)
-	var cohesion_gain := mini(6, 100 - cohesion)
-	food -= 5
-	cohesion += cohesion_gain
-	_event("NEANDERTHAL MEETING  /  Two human groups share a refuge. Food −5, cohesion +%d. Shared descendants recorded." % cohesion_gain)
-	_refresh_ui()
+	_change_food(-5.0)
+	_start_task("kinship", "meeting", TASK_KINSHIP_DURATION, {"food_paid": 5.0})
 
 
 func _share_camp_blocker() -> String:
@@ -1709,12 +1841,8 @@ func _mating_blocker() -> String:
 func _on_mate() -> void:
 	if not _season_action_blocker().is_empty() or not _mating_blocker().is_empty():
 		return
-	season_action_used = true
-	food -= MATING_FOOD_COST
-	succession_turn = turn + SUCCESSION_SEASONS
-	_start_player_activity("pairing", 3.0)
-	_event("PAIRING  /  You form a pair with an adult from a neighboring band. Food −%d. Your offspring takes over in %d seasons." % [MATING_FOOD_COST, SUCCESSION_SEASONS])
-	_refresh_ui()
+	_change_food(-float(MATING_FOOD_COST))
+	_start_task("mate", "pairing", TASK_MATE_DURATION, {"food_paid": float(MATING_FOOD_COST)})
 
 
 func _complete_succession() -> void:
@@ -1758,13 +1886,19 @@ func _period_name() -> String:
 	return "THE PRESENT"
 
 
+func _refresh_stats_bar() -> void:
+	if not is_instance_valid(stats_label):
+		return
+	var gen_text := "%d · aging" % generation if adult_age >= AGING_RANGE_PENALTY_AGE else str(generation)
+	stats_label.text = "FOOD   %d   ◇     KNOWLEDGE   %d   ◇     COHESION   %d   ◇     GEN   %s   ◇     HOMININS   %d" % [food, knowledge, cohesion, gen_text, PLAYER_COUNT]
+
+
 func _refresh_ui() -> void:
 	if not is_instance_valid(stats_label):
 		return
 	age_label.text = _format_year(year_bp)
 	period_label.text = _period_name()
-	var gen_text := "%d · aging" % generation if adult_age >= AGING_RANGE_PENALTY_AGE else str(generation)
-	stats_label.text = "FOOD   %d   ◇     KNOWLEDGE   %d   ◇     COHESION   %d   ◇     GEN   %s   ◇     HOMININS   %d" % [food, knowledge, cohesion, gen_text, PLAYER_COUNT]
+	_refresh_stats_bar()
 	var current := int(discovered[0])
 	if turn >= 29: current = 7
 	elif turn >= 25: current = 4
@@ -1790,18 +1924,21 @@ func _refresh_action_label() -> void:
 		return
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
 	var terrain: String = world.terrain_at(tile)
-	var status := "Action available"
+	var status := "Ready"
 	if lineage_ended:
 		status = "Lineage lost"
 	elif turn >= CHRONICLE_TURNS:
 		status = "Chronicle complete"
-	elif season_action_used:
-		status = "Action used"
+	elif paused:
+		status = "Paused"
+	elif not active_task.is_empty():
+		status = str(active_task["kind"]).capitalize() + "…"
 	elif player_actor["position"] != player_actor["target"]:
 		status = "Traveling"
 	var location := "Spring" if tile in WORLD_MAP_SCRIPT.SPRING_TILES else ("Waterhole" if tile == WORLD_MAP_SCRIPT.SEASONAL_WATERHOLE_TILE else terrain.capitalize())
-	action_label.text = "%s  ·  %s  ·  %s\nRange: %d / %d tiles  ·  Mapped: %d / %d\nMove: click/WASD  ·  Pan: drag  ·  Zoom: wheel" % [_season_name(turn), location, status, moves_remaining, _max_travel_range(), explored_tiles.size(), WORLD_MAP_SCRIPT.WORLD_WIDTH * WORLD_MAP_SCRIPT.WORLD_HEIGHT]
-	_refresh_season_button(tile)
+	var upkeep := _season_food_cost(tile, turn)
+	action_label.text = "%s  ·  %s  ·  %s\nFood drain: −%d/season  ·  Mapped: %d / %d\nF: Gather  ·  Q: Scout  ·  K: Skills  ·  Space: Pause" % [_season_name(turn), location, status, upkeep, explored_tiles.size(), WORLD_MAP_SCRIPT.WORLD_WIDTH * WORLD_MAP_SCRIPT.WORLD_HEIGHT]
+	_refresh_season_bar(tile)
 
 	var blocker := _season_action_blocker()
 	var tile_id: int = world.tile_id(tile)
@@ -1914,7 +2051,7 @@ func _refresh_skills_panel() -> void:
 			req_label.add_theme_color_override("font_color", Color("#c79b70"))
 		btn.text = "Learn (−%d K)" % int(skill["cost"])
 		btn.disabled = not learn_blocker.is_empty()
-		btn.tooltip_text = learn_blocker if btn.disabled else "Spend %d knowledge and this season's action to learn %s." % [int(skill["cost"]), skill["name"]]
+		btn.tooltip_text = learn_blocker if btn.disabled else "Spend %d knowledge to learn %s immediately." % [int(skill["cost"]), skill["name"]]
 
 
 func _refresh_mate_button(action_blocker: String) -> void:
@@ -1923,46 +2060,52 @@ func _refresh_mate_button(action_blocker: String) -> void:
 	if not _run_ended() and (succession_turn >= 0 or blocker.is_empty()):
 		blocker = _mating_blocker()
 	mate_button.disabled = not blocker.is_empty()
-	mate_button.tooltip_text = blocker if mate_button.disabled else "Spend %d food and this season's action. Continue as your offspring in %d seasons." % [MATING_FOOD_COST, SUCCESSION_SEASONS]
+	mate_button.tooltip_text = blocker if mate_button.disabled else "Spend %d food (%.1fs) to pair. Continue as your offspring in %d seasons." % [MATING_FOOD_COST, TASK_MATE_DURATION, SUCCESSION_SEASONS]
 
 
-func _refresh_season_button(tile: Vector2i) -> void:
-	if lineage_ended:
+func _refresh_season_bar(tile: Vector2i) -> void:
+	if not is_instance_valid(season_bar_fill):
+		return
+	var ended := _run_ended()
+	season_bar_bg.visible = not ended
+	season_bar_fill.visible = not ended
+	season_bar_label.visible = not ended
+	pause_button.visible = not ended
+	speed_button.visible = not ended
+	advance_button.visible = ended
+	if ended:
 		advance_button.disabled = false
 		advance_button.text = "NEW CHRONICLE  ›"
-		advance_button.tooltip_text = "Your band scattered. Begin a new chronicle from 3.2 Ma."
+		advance_button.tooltip_text = "Your band scattered. Begin a new chronicle from 3.2 Ma." if lineage_ended else "The chronicle is complete. Begin a new run from 3.2 Ma."
 		return
-	var complete := turn >= CHRONICLE_TURNS
-	if complete:
-		advance_button.disabled = false
-		advance_button.text = "NEW CHRONICLE  ›"
-		advance_button.tooltip_text = "The chronicle is complete. Begin a new run from 3.2 Ma."
-		return
-	var traveling: bool = player_actor["position"] != player_actor["target"]
-	advance_button.disabled = traveling
-	if traveling:
-		advance_button.text = "TRAVELING"
-		advance_button.tooltip_text = "Reach your destination to pass the season."
-		return
-	var next_turn := turn + 1
-	var season := _season_name(next_turn)
-	var cost := _season_food_cost(tile, next_turn)
-	advance_button.text = "ENTER %s  ·  −%d FOOD  ›" % [season.to_upper(), cost]
-	advance_button.tooltip_text = "Spend %d food here and open a new action in the %s season." % [cost, season.to_lower()]
-	if next_turn % 2 == 1:
-		advance_button.tooltip_text += " End next to a river, lake, or spring to pay %d food." % DRY_SEASON_WATER_FOOD_COST
+	var fraction := clampf(season_elapsed / SEASON_DURATION, 0.0, 1.0)
+	var secs_left := ceili(maxf(0.0, SEASON_DURATION - season_elapsed))
+	var next_season := _season_name(turn + 1).to_upper()
+	var is_dry := turn % 2 == 1
+	var dry_warning := (not is_dry) and secs_left <= 6 and not world.near_permanent_water(tile)
+	season_bar_fill.size.x = 254.0 * fraction
+	if dry_warning:
+		season_bar_fill.color = Color("#d46f3e")
+	else:
+		season_bar_fill.color = Color("#c28a48") if is_dry else Color("#4b8378")
+	if paused:
+		season_bar_label.text = "PAUSED  ·  %s IN %ds" % [next_season, secs_left]
+	elif dry_warning:
+		season_bar_label.text = "DRY IN %ds  ·  SEEK WATER" % secs_left
+	else:
+		season_bar_label.text = "%s  ·  %s IN %ds" % [_season_name(turn).to_upper(), next_season, secs_left]
+	pause_button.text = "Resume (Space)" if paused else "Pause (Space)"
+	speed_button.text = "Speed 2×" if time_scale > 1.5 else "Speed 1×"
 
 
 func _set_player_destination(tile: Vector2i, announce := true, direct := false) -> void:
 	if _run_ended():
 		return
+	if not active_task.is_empty():
+		_cancel_active_task(true)
 	if announce:
 		movement_key = KEY_NONE
-	if moves_remaining <= 0:
-		if announce:
-			_show_toast("Travel range spent for this season. Pass the season to rest.")
-		return
-	if not _route_actor_to(player_actor, tile, direct, moves_remaining):
+	if not _route_actor_to(player_actor, tile, direct):
 		if announce:
 			var tile_id: int = world.tile_id(tile)
 			var message := "Active wildfire — wait until flames cool." if wildfire_tiles.get(tile_id, {}).get("state", "") == "burning" else ("Pick a destination on land." if not world.has_land_route_point(tile) else "No land route leads there.")
@@ -1986,21 +2129,27 @@ func _continue_keyboard_movement(delta: float) -> void:
 		return
 	var position: Vector2 = player_actor["position"]
 	var target: Vector2 = player_actor["target"]
-	var braking_distance := PLAYER_SPEED * PLAYER_SPEED / (2.0 * TRAVEL_ACCELERATION)
-	if player_actor["route"].is_empty() and position.distance_to(target) <= braking_distance + PLAYER_SPEED * delta:
+	var speed := _player_speed()
+	var braking_distance := speed * speed / (2.0 * TRAVEL_ACCELERATION)
+	if player_actor["route"].is_empty() and position.distance_to(target) <= braking_distance + speed * delta:
 		_set_player_destination(world.tile_from_world(target) + keyboard_step, false, true)
 
 
 func _input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
-		if is_instance_valid(summary_overlay) and summary_overlay.visible:
-			_on_close_summary()
-			get_viewport().set_input_as_handled()
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_ESCAPE:
+			if is_instance_valid(summary_overlay) and summary_overlay.visible:
+				_on_close_summary()
+				get_viewport().set_input_as_handled()
+				return
+			if is_instance_valid(skills_overlay) and skills_overlay.visible:
+				_on_toggle_skills()
+				get_viewport().set_input_as_handled()
 			return
-		if is_instance_valid(skills_overlay) and skills_overlay.visible:
+		if event.keycode == KEY_K and not (is_instance_valid(summary_overlay) and summary_overlay.visible):
 			_on_toggle_skills()
 			get_viewport().set_input_as_handled()
-		return
+			return
 	if (is_instance_valid(skills_overlay) and skills_overlay.visible) or (is_instance_valid(summary_overlay) and summary_overlay.visible):
 		return
 	if event is InputEventMagnifyGesture:
@@ -2036,6 +2185,18 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_SPACE:
+			_on_toggle_pause()
+			get_viewport().set_input_as_handled()
+			return
+		if event.keycode == KEY_1:
+			_set_speed(1.0)
+			get_viewport().set_input_as_handled()
+			return
+		if event.keycode == KEY_2:
+			_set_speed(2.0)
+			get_viewport().set_input_as_handled()
+			return
 		if event.keycode in [KEY_EQUAL, KEY_KP_ADD]:
 			_set_zoom(zoom_level * 1.15, MAP_VIEW.get_center())
 			get_viewport().set_input_as_handled()
@@ -2045,6 +2206,14 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 		if _run_ended():
+			return
+		if event.keycode in [KEY_F, KEY_E]:
+			_on_gather()
+			get_viewport().set_input_as_handled()
+			return
+		if event.keycode == KEY_Q:
+			_on_explore()
+			get_viewport().set_input_as_handled()
 			return
 		var step := Vector2i.ZERO
 		# Pair isometric axes so keyboard input follows screen directions.

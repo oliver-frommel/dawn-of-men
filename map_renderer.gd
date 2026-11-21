@@ -109,7 +109,8 @@ func draw_player_marker(
 	map_view: Rect2,
 	world_to_screen: Callable,
 	player_actor: Dictionary,
-	ai_bands: Array[Dictionary]
+	ai_bands: Array[Dictionary],
+	task_progress := -1.0
 ) -> void:
 	var center: Vector2 = player_actor["position"]
 	if not map_view.grow(70.0).has_point(world_to_screen.call(center)):
@@ -123,7 +124,7 @@ func draw_player_marker(
 		canvas.draw_arc(trail[-1], 10.0, 0, TAU, 20, Color("#f1cf92"), 1.6)
 	var activity: String = player_actor["activity"]
 	if activity != "idle":
-		_draw_player_activity(canvas, center, activity, ai_bands)
+		_draw_player_activity(canvas, center, activity, ai_bands, task_progress)
 
 
 func draw_band_markers(
@@ -644,7 +645,7 @@ func _draw_palm(canvas: CanvasItem, point: Vector2, scale: float) -> void:
 	canvas.draw_circle(crown + Vector2(2, 2) * scale, 2.0 * scale, Color("#705436"))
 
 
-func _draw_player_activity(canvas: CanvasItem, center: Vector2, activity: String, ai_bands: Array[Dictionary]) -> void:
+func _draw_player_activity(canvas: CanvasItem, center: Vector2, activity: String, ai_bands: Array[Dictionary], task_progress := -1.0) -> void:
 	var label := "MOVING"
 	var color := Color("#d9c596")
 	match activity:
@@ -701,3 +702,7 @@ func _draw_player_activity(canvas: CanvasItem, center: Vector2, activity: String
 		ThemeDB.fallback_font, center + Vector2(-41, -88), label,
 		HORIZONTAL_ALIGNMENT_CENTER, 82, 10, color
 	)
+	if task_progress >= 0.0:
+		var bar := Rect2(center.x - 43, center.y - 83, 86, 4)
+		canvas.draw_rect(bar, Color("#121d1a"))
+		canvas.draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(task_progress, 0.0, 1.0), bar.size.y)), color)

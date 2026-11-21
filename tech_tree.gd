@@ -53,8 +53,8 @@ const SKILLS := [
 		"requires": [],
 		"landmark": "",
 		"min_turn": 0,
-		"summary": "Scout radius grows from 4 to 5 tiles, and seasonal travel range grows by +2 tiles.",
-		"chronicle": "SKILL LEARNED  /  Trail Reading. Game paths and ridgelines extend your scouting and travel range."
+		"summary": "Scout radius grows from 4 to 5 tiles, and walking speed increases across the valley.",
+		"chronicle": "SKILL LEARNED  /  Trail Reading. Game paths and ridgelines extend your scouting radius and travel speed."
 	},
 	{
 		"id": "stone_flaking",
