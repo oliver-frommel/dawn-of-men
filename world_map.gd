@@ -16,6 +16,9 @@ const SHORE_SAND := Color("#a99467")
 const SHORE_DEEP := Color("#397b86")
 const SHORE_UVS := [Vector2(0.5, 0.0), Vector2(1.0, 0.5), Vector2(0.5, 1.0), Vector2(0.0, 0.5)]
 const SPRING_TILE := Vector2i(13, 10)
+const OBSIDIAN_TILE := Vector2i(8, 18)
+const SHELTERED_CLIFF_TILE := Vector2i(28, 6)
+const SEASONAL_WATERHOLE_TILE := Vector2i(21, 17)
 const EASTERN_SPRING_TILE := Vector2i(43, 30)
 const SPRING_TILES := [SPRING_TILE, EASTERN_SPRING_TILE]
 const WORLD_START := Vector2i(16, 12)
@@ -26,9 +29,9 @@ const TILE_VERTICES := [Vector2(-0.5, -0.5), Vector2(0.5, -0.5), Vector2(0.5, 0.
 const LANDMARKS := [
 	{"tile":Vector2i(15, 9), "name":"Hominin Fossil Beds", "kind":"fossil", "food":0, "knowledge":10, "cohesion":0},
 	{"tile":SPRING_TILE, "name":"Spring-Fed Riverbank", "kind":"spring", "food":10, "knowledge":0, "cohesion":0},
-	{"tile":Vector2i(8, 18), "name":"Obsidian Outcrop", "kind":"obsidian", "food":0, "knowledge":7, "cohesion":0},
-	{"tile":Vector2i(28, 6), "name":"Sheltered Cliff", "kind":"shelter", "food":0, "knowledge":0, "cohesion":6},
-	{"tile":Vector2i(21, 17), "name":"Seasonal Waterhole", "kind":"waterhole", "food":12, "knowledge":0, "cohesion":0},
+	{"tile":OBSIDIAN_TILE, "name":"Obsidian Outcrop", "kind":"obsidian", "food":0, "knowledge":7, "cohesion":0},
+	{"tile":SHELTERED_CLIFF_TILE, "name":"Sheltered Cliff", "kind":"shelter", "food":0, "knowledge":0, "cohesion":6},
+	{"tile":SEASONAL_WATERHOLE_TILE, "name":"Seasonal Waterhole", "kind":"waterhole", "food":12, "knowledge":0, "cohesion":0},
 	{"tile":EASTERN_SPRING_TILE, "name":"Eastern Spring", "kind":"spring", "food":10, "knowledge":0, "cohesion":0},
 	{"tile":Vector2i(50, 34), "name":"Escarpment Overhang", "kind":"shelter", "food":0, "knowledge":0, "cohesion":6},
 	{"tile":Vector2i(33, 39), "name":"Southern Stone Beds", "kind":"fossil", "food":0, "knowledge":10, "cohesion":0}

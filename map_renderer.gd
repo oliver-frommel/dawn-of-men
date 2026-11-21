@@ -23,7 +23,9 @@ func draw_map(
 	zoom_level: float,
 	screen_to_world: Callable,
 	explored_tiles: Dictionary,
-	discovered_landmarks: Dictionary
+	discovered_landmarks: Dictionary,
+	is_dry_season := false,
+	depleted_tiles: Dictionary = {}
 ) -> void:
 	var visible: Array[Vector2i] = []
 	var extent := Vector2(WorldMapScript.TILE_W * 0.5, WorldMapScript.TILE_H * 0.5 + 72.0) * zoom_level
@@ -41,21 +43,24 @@ func draw_map(
 		for x in range(min_x, max_x + 1):
 			var tile := Vector2i(x, depth - x)
 			var center := world.tile_center(tile.x, tile.y)
-			if explored_tiles.has(world.tile_id(tile)):
+			var id := world.tile_id(tile)
+			if explored_tiles.has(id):
 				visible.append(tile)
-				_draw_terrain_ground(canvas, center, tile, world.terrain_at(tile))
+				_draw_terrain_ground(canvas, center, tile, world.terrain_at(tile), is_dry_season, depleted_tiles.has(id))
 			else:
 				_draw_unexplored_tile(canvas, center, tile.x, tile.y)
 	for tile in visible:
 		var center := world.tile_center(tile.x, tile.y)
 		_draw_exploration_frontier(canvas, center, tile, explored_tiles)
 		_draw_terrain_details(canvas, center, world.terrain_at(tile), tile.x, tile.y)
+		if depleted_tiles.has(world.tile_id(tile)):
+			_draw_depleted_mark(canvas, center)
 	for tile in visible:
 		var id := world.tile_id(tile)
 		if discovered_landmarks.has(id):
 			var landmark := world.landmark_for_tile(tile)
 			if not landmark.is_empty():
-				_draw_landmark_icon(canvas, world.tile_center(tile.x, tile.y), str(landmark["kind"]))
+				_draw_landmark_icon(canvas, world.tile_center(tile.x, tile.y), str(landmark["kind"]), is_dry_season)
 
 
 func draw_actor_shadows(
@@ -153,7 +158,7 @@ func _draw_unexplored_tile(canvas: CanvasItem, center: Vector2, x: int, y: int) 
 	canvas.draw_polyline(outline, Color("#38443f", 0.12), 0.7, true)
 
 
-func _draw_terrain_ground(canvas: CanvasItem, center: Vector2, tile: Vector2i, terrain: String) -> void:
+func _draw_terrain_ground(canvas: CanvasItem, center: Vector2, tile: Vector2i, terrain: String, is_dry_season := false, is_depleted := false) -> void:
 	var color := Color("#a39b59")
 	match terrain:
 		"woodland": color = Color("#687d49")
@@ -162,6 +167,10 @@ func _draw_terrain_ground(canvas: CanvasItem, center: Vector2, tile: Vector2i, t
 		"highland": color = Color("#817b58")
 		"volcanic": color = Color("#8c7057")
 		"river", "lake": color = Color("#93875a")
+	if is_dry_season and terrain in ["savanna", "woodland", "wetland", "dryland"]:
+		color = color.lerp(Color("#b69a62"), 0.20)
+	if is_depleted:
+		color = color.darkened(0.14)
 	var corners := PackedVector2Array()
 	var colors := PackedColorArray()
 	for vertex in WorldMapScript.TILE_VERTICES:
@@ -258,7 +267,16 @@ func _draw_exploration_frontier(canvas: CanvasItem, center: Vector2, tile: Vecto
 		canvas.draw_line(edge["from"], edge["to"], Color("#c8b77d", 0.34), 1.0, true)
 
 
-func _draw_landmark_icon(canvas: CanvasItem, center: Vector2, kind: String) -> void:
+func _draw_depleted_mark(canvas: CanvasItem, center: Vector2) -> void:
+	var ring := PackedVector2Array()
+	for i in range(12):
+		var a := TAU * float(i) / 12.0
+		ring.append(center + Vector2(cos(a) * 18.0, sin(a) * 9.0))
+	ring.append(ring[0])
+	canvas.draw_polyline(ring, Color("#8b7450", 0.55), 1.1, true)
+
+
+func _draw_landmark_icon(canvas: CanvasItem, center: Vector2, kind: String, is_dry_season := false) -> void:
 	var badge := center + Vector2(23, -8)
 	canvas.draw_circle(badge, 8.0, Color("#24342d", 0.92))
 	var tint := Color("#f1d393")
@@ -283,8 +301,13 @@ func _draw_landmark_icon(canvas: CanvasItem, center: Vector2, kind: String) -> v
 			]), Color("#a18a67"))
 			canvas.draw_arc(badge + Vector2(0, 4), 3.5, PI, TAU, 12, Color("#28302a"), 2.0, true)
 		"waterhole":
-			canvas.draw_arc(badge + Vector2(0, 1), 6.0, 0, TAU, 16, Color("#9dd2c4"), 1.2, true)
-			_draw_reeds(canvas, badge + Vector2(4, -3))
+			if is_dry_season:
+				canvas.draw_arc(badge + Vector2(0, 1), 6.0, 0, TAU, 16, Color("#b09162"), 1.2, true)
+				canvas.draw_line(badge + Vector2(-3, 0), badge + Vector2(3, 2), Color("#8c734b"), 1.0, true)
+			else:
+				canvas.draw_circle(badge + Vector2(0, 1), 5.0, Color("#4c8e94", 0.75))
+				canvas.draw_arc(badge + Vector2(0, 1), 6.0, 0, TAU, 16, Color("#9dd2c4"), 1.2, true)
+				_draw_reeds(canvas, badge + Vector2(4, -3))
 
 
 func _draw_flower(canvas: CanvasItem, point: Vector2, color: Color) -> void:

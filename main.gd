@@ -14,15 +14,23 @@ const HEARTH_KEEPING_KA := 1000
 const WET_SEASON_FOOD_COST := 6
 const DRY_SEASON_WATER_FOOD_COST := 4
 const DRY_SEASON_FOOD_COST := 10
+const DRY_SEASON_CARRY_WATER_FOOD_COST := 8
 const LOW_FOOD_COHESION_PENALTY := -3
+const WINDBREAKS_LOW_FOOD_COHESION_PENALTY := -1
 const STARVATION_COHESION_PENALTY := -6
 const MATING_FOOD_COST := 8
 const MATE_RANGE := 76.0
 const SUCCESSION_SEASONS := 2
 const SUCCESSION_COHESION := 8
-const SCOUT_RADIUS := 4
-const FORAGE_KNOWLEDGE_THRESHOLD := 45
-const FORAGE_KNOWLEDGE_BONUS := 4
+const BASE_SCOUT_RADIUS := 4
+const TRAIL_READING_SCOUT_RADIUS := 5
+const BASE_TRAVEL_RANGE := 7
+const TRAIL_READING_TRAVEL_BONUS := 2
+const ERECTUS_TRAVEL_BONUS := 3
+const BASE_PRACTICE_FOOD_COST := 8
+const HEARTH_PRACTICE_FOOD_COST := 4
+const EMBER_PRACTICE_FOOD_COST := 6
+const WET_WATERHOLE_FORAGE := 18
 const WET_FORAGE_YIELDS := {
 	"woodland": 18, "wetland": 22, "savanna": 13, "river": 0,
 	"highland": 9, "dryland": 6, "volcanic": 6, "lake": 0
@@ -46,6 +54,7 @@ const SPECIES := [
 
 const WORLD_MAP_SCRIPT := preload("res://world_map.gd")
 const MAP_RENDERER_SCRIPT := preload("res://map_renderer.gd")
+const TECH_TREE_SCRIPT := preload("res://tech_tree.gd")
 const HOMININ_MODEL_SCRIPT := preload("res://hominin_model.gd")
 const WILDLIFE_MODEL_SCRIPT := preload("res://wildlife_model.gd")
 
@@ -63,7 +72,11 @@ var year_bp := 3200
 var food := 68
 var knowledge := 12
 var cohesion := 57
+var moves_remaining := BASE_TRAVEL_RANGE
 var discovered: Array[int] = [0]
+var learned_skills: Dictionary = {}
+var discovered_landmark_names: Dictionary = {}
+var depleted_tiles: Dictionary = {}
 var event_log: Array[String] = ["The Rift Valley opens before your ancestors. Travel permanently charts the land.", "Afarensis bands learn the old paths."]
 var map_names := ["Laetoli", "Olduvai", "Turkana", "Afar", "Awash", "Omo", "Tugen Hills", "Lomekwi"]
 var toast := ""
@@ -80,10 +93,14 @@ var action_label: Label
 var forage_button: Button
 var scout_button: Button
 var learn_button: Button
+var skills_button: Button
 var kinship_button: Button
 var mate_button: Button
 var advance_button: Button
 var toast_label: Label
+var skills_overlay: Control
+var skills_header_label: Label
+var skill_cards: Dictionary = {}
 var player_actor: Dictionary = {}
 var ai_bands: Array[Dictionary] = []
 var camera_offset := Vector2.ZERO
@@ -196,6 +213,7 @@ func _discover_landmark(tile: Vector2i) -> void:
 	if discovered_landmarks.has(id):
 		return
 	discovered_landmarks[id] = true
+	discovered_landmark_names[str(landmark["name"])] = true
 	var rewards: Array[String] = []
 	var food_gain := int(landmark["food"])
 	var knowledge_gain := int(landmark["knowledge"])
@@ -258,15 +276,22 @@ func _make_ai_band(label: String, start: Vector2i, goals: Array, color: Color, p
 	return actor
 
 
-func _route_actor_to(actor: Dictionary, tile: Vector2i, direct := false) -> bool:
+func _route_actor_to(actor: Dictionary, tile: Vector2i, direct := false, max_steps := -1) -> bool:
 	var origin: Vector2 = actor["target"]
 	var result: Dictionary = world.find_route(origin, tile, direct)
 	if not result["ok"]:
 		return false
 	var route: Array = result["route"]
+	if max_steps >= 0:
+		if max_steps == 0 or route.is_empty():
+			return false
+		if route.size() > max_steps:
+			route.resize(max_steps)
 	actor["route"] = route
 	if actor["position"] == origin and not route.is_empty():
 		actor["target"] = route.pop_front()
+		if actor["is_player"]:
+			moves_remaining = maxi(0, moves_remaining - 1)
 	return true
 
 
@@ -293,9 +318,19 @@ func _update_actor(actor: Dictionary, delta: float, speed: float) -> bool:
 			return step > 0.0
 	actor["position"] = target
 	if not route.is_empty():
-		actor["target"] = route.pop_front()
-		actor["moving"] = true
-		return true
+		if actor["is_player"]:
+			if moves_remaining <= 0:
+				route.clear()
+			else:
+				actor["target"] = route.pop_front()
+				moves_remaining = maxi(0, moves_remaining - 1)
+				actor["moving"] = true
+				_refresh_action_label()
+				return true
+		else:
+			actor["target"] = route.pop_front()
+			actor["moving"] = true
+			return true
 	actor["moving"] = false
 	actor["travel_speed"] = 0.0
 	if actor["is_player"] and actor["activity"] == "walking":
@@ -676,7 +711,7 @@ func _wildlife_caption() -> String:
 func _draw() -> void:
 	map_renderer.draw_world(self, W, H)
 	draw_set_transform(_map_draw_origin(), 0.0, Vector2.ONE * zoom_level)
-	map_renderer.draw_map(self, MAP_VIEW, zoom_level, _screen_to_world, explored_tiles, discovered_landmarks)
+	map_renderer.draw_map(self, MAP_VIEW, zoom_level, _screen_to_world, explored_tiles, discovered_landmarks, turn % 2 == 1, depleted_tiles)
 	map_renderer.draw_actor_shadows(self, MAP_VIEW, _world_to_screen, player_actor, ai_bands, wildlife)
 	draw_set_transform(Vector2.ZERO)
 	if is_instance_valid(hominin_viewport):
@@ -778,17 +813,59 @@ func _build_ui() -> void:
 	# Commands sit in a shallow strip over the bottom edge instead of occupying another panel.
 	_panel(root, Rect2(0, 830, 1190, 70), Color(0.07, 0.12, 0.11, 0.96))
 	_panel(root, Rect2(0, 830, 1190, 2), Color("#b99561"))
-	action_label = _label(root, "", Rect2(16, 839, 310, 53), 9, Color("#e9e0ce"), false)
-	forage_button = _button(root, "Forage", Rect2(340, 841, 124, 46), Color("#3b554b"), _on_gather)
-	scout_button = _button(root, "Scout", Rect2(474, 841, 112, 46), Color("#3b554b"), _on_explore)
-	learn_button = _button(root, "Learn −8", Rect2(596, 841, 112, 46), Color("#3b554b"), _on_learn)
-	kinship_button = _button(root, "Meet kin", Rect2(718, 841, 100, 46), Color("#684d54"), _on_encounter)
-	mate_button = _button(root, "Find mate", Rect2(828, 841, 96, 46), Color("#684d54"), _on_mate)
-	advance_button = _button(root, "PASS THE SEASON  ›", Rect2(934, 841, 238, 46), Color("#b88d56"), _on_advance)
+	action_label = _label(root, "", Rect2(14, 839, 264, 53), 8, Color("#e9e0ce"), false)
+	forage_button = _button(root, "Forage", Rect2(284, 841, 118, 46), Color("#3b554b"), _on_gather)
+	scout_button = _button(root, "Scout", Rect2(408, 841, 82, 46), Color("#3b554b"), _on_explore)
+	learn_button = _button(root, "Practice −8", Rect2(496, 841, 112, 46), Color("#3b554b"), _on_learn)
+	skills_button = _button(root, "Skills", Rect2(614, 841, 88, 46), Color("#465662"), _on_toggle_skills)
+	kinship_button = _button(root, "Meet kin", Rect2(708, 841, 98, 46), Color("#684d54"), _on_encounter)
+	mate_button = _button(root, "Find mate", Rect2(812, 841, 98, 46), Color("#684d54"), _on_mate)
+	advance_button = _button(root, "PASS THE SEASON  ›", Rect2(920, 841, 256, 46), Color("#b88d56"), _on_advance)
 	toast_label = _label(root, "", Rect2(260, 80, 670, 42), 12, Color("#f1d7a5"), true)
 	toast_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	toast_label.hide()
+	_build_skills_overlay(root)
 	_refresh_ui()
+
+
+func _build_skills_overlay(root: Control) -> void:
+	skills_overlay = Control.new()
+	skills_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	skills_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	skills_overlay.hide()
+	root.add_child(skills_overlay)
+
+	var backdrop := ColorRect.new()
+	backdrop.position = MAP_VIEW.position
+	backdrop.size = MAP_VIEW.size
+	backdrop.color = Color(0.04, 0.08, 0.08, 0.72)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	skills_overlay.add_child(backdrop)
+
+	var box := Rect2(86, 108, 1018, 684)
+	_panel(skills_overlay, box, Color("#15221f"), Color("#b99561"))
+	_label(skills_overlay, "SKILLS  ·  HOMININ KNOWLEDGE", Rect2(box.position.x + 24, box.position.y + 16, 420, 28), 14, Color("#e3c58d"), true)
+	skills_header_label = _label(skills_overlay, "", Rect2(box.position.x + 450, box.position.y + 18, 420, 24), 10, Color("#d9d1bf"), false)
+	_button(skills_overlay, "Close", Rect2(box.end.x - 104, box.position.y + 14, 82, 32), Color("#4b5a53"), _on_toggle_skills)
+
+	skill_cards.clear()
+	for branch in range(3):
+		var row_y := box.position.y + 64 + branch * 204
+		_label(skills_overlay, TECH_TREE_SCRIPT.BRANCH_NAMES[branch], Rect2(box.position.x + 24, row_y, 320, 20), 9, Color("#b99561"), true)
+		for tier in range(3):
+			var card_x := box.position.x + 24 + tier * 328
+			var card_y := row_y + 24
+			if tier > 0:
+				_label(skills_overlay, "→", Rect2(card_x - 22, card_y + 66, 20, 24), 14, Color("#b99561"), true)
+			var skill: Dictionary = TECH_TREE_SCRIPT.SKILLS[branch * 3 + tier]
+			var skill_id: String = skill["id"]
+			var card_bg := _panel(skills_overlay, Rect2(card_x, card_y, 304, 166), Color("#1d2e29"), Color("#51665b"))
+			var title := _label(skills_overlay, "%s  ·  %d K" % [skill["name"], int(skill["cost"])], Rect2(card_x + 12, card_y + 10, 280, 22), 10, Color("#f2e6cf"), true)
+			var desc := _label(skills_overlay, skill["summary"], Rect2(card_x + 12, card_y + 36, 280, 62), 8, Color("#d4d0c2"), false)
+			var req := _label(skills_overlay, "", Rect2(card_x + 12, card_y + 100, 280, 24), 7, Color("#c7a976"), false)
+			var btn := _button(skills_overlay, "Learn skill", Rect2(card_x + 12, card_y + 126, 280, 30), Color("#3b554b"), _on_learn_skill.bind(skill_id))
+			btn.add_theme_font_size_override("font_size", 14)
+			skill_cards[skill_id] = {"bg": card_bg, "title": title, "desc": desc, "req": req, "button": btn}
 
 
 func _panel(parent: Control, rect: Rect2, color: Color, border := Color(0, 0, 0, 0)) -> ColorRect:
@@ -860,10 +937,50 @@ func _season_name(season_turn: int) -> String:
 	return "Dry" if season_turn % 2 == 1 else "Wet"
 
 
+func _has_skill(skill_id: String) -> bool:
+	return learned_skills.has(skill_id)
+
+
+func _scout_radius() -> int:
+	return TRAIL_READING_SCOUT_RADIUS if _has_skill("trail_reading") else BASE_SCOUT_RADIUS
+
+
+func _max_travel_range() -> int:
+	var limit := BASE_TRAVEL_RANGE
+	if _has_skill("trail_reading"):
+		limit += TRAIL_READING_TRAVEL_BONUS
+	if turn >= 13:
+		limit += ERECTUS_TRAVEL_BONUS
+	return limit
+
+
+func _practice_food_cost(tile: Vector2i) -> int:
+	if _has_skill("hearth_keeping") and tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE:
+		return HEARTH_PRACTICE_FOOD_COST
+	if _has_skill("ember_carrying"):
+		return EMBER_PRACTICE_FOOD_COST
+	return BASE_PRACTICE_FOOD_COST
+
+
 func _season_food_cost(tile: Vector2i, next_turn: int) -> int:
 	if next_turn % 2 == 0:
 		return WET_SEASON_FOOD_COST
-	return DRY_SEASON_WATER_FOOD_COST if world.near_permanent_water(tile) else DRY_SEASON_FOOD_COST
+	if world.near_permanent_water(tile):
+		return DRY_SEASON_WATER_FOOD_COST
+	return DRY_SEASON_CARRY_WATER_FOOD_COST if _has_skill("carry_water") else DRY_SEASON_FOOD_COST
+
+
+func _tick_depleted_tiles(entering_wet: bool) -> void:
+	var decay := 2 if entering_wet else 1
+	var recovered: Array = []
+	for id in depleted_tiles:
+		var remaining := int(depleted_tiles[id]) - decay
+		if remaining <= 0:
+			recovered.append(id)
+		else:
+			depleted_tiles[id] = remaining
+	for id in recovered:
+		depleted_tiles.erase(id)
 
 
 func _run_ended() -> bool:
@@ -877,13 +994,23 @@ func _on_advance() -> void:
 	if player_actor["position"] != player_actor["target"]:
 		return
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
-	var food_cost := _season_food_cost(tile, turn + 1)
-	turn += 1
+	var next_turn := turn + 1
+	var entering_dry := next_turn % 2 == 1
+	var inland := not world.near_permanent_water(tile)
+	var food_cost := _season_food_cost(tile, next_turn)
+	turn = next_turn
 	season_action_used = false
+	moves_remaining = _max_travel_range()
+	_tick_depleted_tiles(not entering_dry)
 	year_bp = max(0, year_bp - 100)
 	food = maxi(0, food - food_cost)
-	var cohesion_delta := 2 if food > 25 else (LOW_FOOD_COHESION_PENALTY if food > 0 else STARVATION_COHESION_PENALTY)
+	var low_food_penalty := LOW_FOOD_COHESION_PENALTY
+	if _has_skill("windbreaks") and (world.terrain_at(tile) == "highland" or tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE):
+		low_food_penalty = WINDBREAKS_LOW_FOOD_COHESION_PENALTY
+	var cohesion_delta := 2 if food > 25 else (low_food_penalty if food > 0 else STARVATION_COHESION_PENALTY)
 	cohesion = clampi(cohesion + cohesion_delta, 0, 100)
+	if entering_dry and inland and _has_skill("hide_working"):
+		cohesion = clampi(cohesion + 2, 0, 100)
 	if food > 0:
 		starvation_warned = false
 	if cohesion == 0:
@@ -912,11 +1039,11 @@ func _on_advance() -> void:
 		_event("Homo habilis appears in the Rift Valley. Stone tools become part of the story.")
 	if turn == 13 and not discovered.has(3):
 		discovered.append(3)
-		_event("Homo erectus emerges. Longer legs carry one human lineage beyond Africa.")
+		_event("Homo erectus emerges. Longer legs carry one human lineage beyond Africa (+3 seasonal travel range).")
 	if year_bp == POSSIBLE_FIRE_USE_KA:
 		_event("POSSIBLE EARLY FIRE USE  /  Early humans may have used fire around this time. The evidence is uncertain.")
 	if year_bp == HEARTH_KEEPING_KA:
-		_event("HEARTH KEEPING  /  In the age of Homo erectus, you can now tend a hearth. Ash and burned bone at Wonderwerk Cave mark fire use around this time.")
+		_event("HEARTH KEEPING  /  In the age of Homo erectus, you can now learn to tend a hearth. Ash and burned bone at Wonderwerk Cave mark fire use around this time.")
 	if turn == 25 and not discovered.has(4):
 		discovered.append(4)
 		_event("Homo heidelbergensis populations spread across continents; later branches include Neanderthals and Denisovans.")
@@ -934,7 +1061,6 @@ func _on_advance() -> void:
 	_complete_succession()
 	if turn == CHRONICLE_TURNS:
 		_event("The chronicle reaches the present. Many branches end; traces of kinship remain.")
-	_check_hide_wrap_unlock()
 	_refresh_ui()
 	queue_redraw()
 	_sync_wildlife()
@@ -954,7 +1080,7 @@ func _season_action_blocker() -> String:
 
 func _unmapped_scout_tiles(tile: Vector2i) -> int:
 	var count := 0
-	for nearby in world.tiles_in_radius(tile, SCOUT_RADIUS):
+	for nearby in world.tiles_in_radius(tile, _scout_radius()):
 		if not explored_tiles.has(world.tile_id(nearby)):
 			count += 1
 	return count
@@ -962,11 +1088,23 @@ func _unmapped_scout_tiles(tile: Vector2i) -> int:
 
 func _forage_food_gain(tile: Vector2i) -> int:
 	var terrain: String = world.terrain_at(tile)
+	if terrain.is_empty() or terrain in ["river", "lake"]:
+		return 0
+	if depleted_tiles.has(world.tile_id(tile)):
+		return 0
+	var is_dry := turn % 2 == 1
 	var yield_on_terrain: int = WET_FORAGE_YIELDS.get(terrain, 0)
-	if turn % 2 == 1:
+	if not is_dry and tile == WORLD_MAP_SCRIPT.SEASONAL_WATERHOLE_TILE:
+		yield_on_terrain = maxi(yield_on_terrain, WET_WATERHOLE_FORAGE)
+	elif is_dry:
 		yield_on_terrain = DRY_SPRING_FORAGE if tile in WORLD_MAP_SCRIPT.SPRING_TILES else DRY_FORAGE_YIELDS.get(terrain, 0)
-	if yield_on_terrain > 0 and knowledge >= FORAGE_KNOWLEDGE_THRESHOLD:
-		yield_on_terrain += FORAGE_KNOWLEDGE_BONUS
+	if yield_on_terrain > 0:
+		if not is_dry and _has_skill("plant_lore") and terrain in ["woodland", "wetland"]:
+			yield_on_terrain += 4
+		if is_dry and _has_skill("food_drying") and not world.near_permanent_water(tile):
+			yield_on_terrain += 3
+		if _has_skill("stone_flaking") and terrain in ["savanna", "dryland", "volcanic"]:
+			yield_on_terrain += 4
 	return mini(yield_on_terrain, 100 - food)
 
 
@@ -979,14 +1117,16 @@ func _on_gather() -> void:
 		return
 	var cohesion_gain := mini(2, 100 - cohesion)
 	season_action_used = true
+	depleted_tiles[world.tile_id(tile)] = 1 if tile in WORLD_MAP_SCRIPT.SPRING_TILES else 2
 	_start_player_activity("gathering", 3.0)
 	food += food_gain
 	cohesion += cohesion_gain
 	if food > 0:
 		starvation_warned = false
-	var site := "at the spring" if tile in WORLD_MAP_SCRIPT.SPRING_TILES else "in %s" % world.terrain_at(tile)
+	var site := "at the spring" if tile in WORLD_MAP_SCRIPT.SPRING_TILES else ("at the waterhole" if tile == WORLD_MAP_SCRIPT.SEASONAL_WATERHOLE_TILE else "in %s" % world.terrain_at(tile))
 	_event("You forage %s. Food +%d, cohesion +%d." % [site, food_gain, cohesion_gain])
 	_refresh_ui()
+	queue_redraw()
 
 
 func _on_explore() -> void:
@@ -998,28 +1138,58 @@ func _on_explore() -> void:
 		return
 	season_action_used = true
 	_start_player_activity("scouting", 3.0)
-	_reveal_around(tile, SCOUT_RADIUS)
+	_reveal_around(tile, _scout_radius())
 	_position_wildlife_models()
 	var knowledge_gain := mini(9, 99 - knowledge)
 	knowledge += knowledge_gain
 	_event("You chart %d new tiles. Knowledge +%d." % [new_tiles, knowledge_gain])
-	_check_hide_wrap_unlock()
 	_refresh_ui()
 
 
 func _on_learn() -> void:
-	if not _season_action_blocker().is_empty() or food < 8 or knowledge >= 99:
+	var tile: Vector2i = world.tile_from_world(player_actor["position"])
+	var cost := _practice_food_cost(tile)
+	if not _season_action_blocker().is_empty() or food < cost or knowledge >= 99:
 		return
 	season_action_used = true
-	var at_hearth := year_bp <= HEARTH_KEEPING_KA
+	var at_hearth := _has_skill("ember_carrying") or (_has_skill("hearth_keeping") and tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE) or year_bp <= HEARTH_KEEPING_KA
 	_start_player_activity("learning_at_hearth" if at_hearth else "learning", 3.0)
 	var knowledge_gain := mini(15, 99 - knowledge)
-	food -= 8
+	food -= cost
 	knowledge += knowledge_gain
 	var practice := "You practice skills by the hearth." if at_hearth else "You practice skills."
-	_event("%s Food −8, knowledge +%d." % [practice, knowledge_gain])
-	_check_hide_wrap_unlock()
+	_event("%s Food −%d, knowledge +%d." % [practice, cost, knowledge_gain])
 	_refresh_ui()
+
+
+func _on_toggle_skills() -> void:
+	if not is_instance_valid(skills_overlay):
+		return
+	skills_overlay.visible = not skills_overlay.visible
+	if skills_overlay.visible:
+		movement_key = KEY_NONE
+		_refresh_skills_panel()
+
+
+func _on_learn_skill(skill_id: String) -> void:
+	var skill: Dictionary = TECH_TREE_SCRIPT.get_skill(skill_id)
+	if skill.is_empty():
+		return
+	var blocker: String = TECH_TREE_SCRIPT.can_learn(skill, learned_skills, discovered_landmark_names, turn, knowledge, _season_action_blocker())
+	if not blocker.is_empty():
+		return
+	season_action_used = true
+	knowledge -= int(skill["cost"])
+	learned_skills[skill_id] = true
+	if skill_id == "hide_working":
+		hide_wrap_unlocked = true
+	elif skill_id == "trail_reading":
+		moves_remaining += TRAIL_READING_TRAVEL_BONUS
+	_start_player_activity("learning_at_hearth" if skill_id in ["hearth_keeping", "ember_carrying"] else "learning", 3.0)
+	_event(str(skill["chronicle"]))
+	_refresh_ui()
+	_sync_hominin_models()
+	queue_redraw()
 
 
 func _on_encounter() -> void:
@@ -1088,14 +1258,6 @@ func _complete_succession() -> void:
 	var cohesion_gain := mini(SUCCESSION_COHESION, 100 - cohesion)
 	cohesion += cohesion_gain
 	_event("SUCCESSION  /  You continue as your grown offspring. Generation %d, cohesion +%d." % [generation, cohesion_gain])
-
-
-func _check_hide_wrap_unlock() -> void:
-	if hide_wrap_unlocked or turn < 24 or knowledge < 30:
-		return
-	hide_wrap_unlocked = true
-	cohesion = mini(100, cohesion + 4)
-	_event("HIDE-WRAP CRAFT  /  Hide working becomes a cultural advantage. Some later-generation adults wear simple wraps; cohesion +4.")
 
 
 func _event(text: String) -> void:
@@ -1167,11 +1329,12 @@ func _refresh_action_label() -> void:
 		status = "Action used"
 	elif player_actor["position"] != player_actor["target"]:
 		status = "Traveling"
-	var location := "Spring" if tile in WORLD_MAP_SCRIPT.SPRING_TILES else terrain.capitalize()
-	action_label.text = "%s season  ·  %s  ·  %s\nMove: click or WASD  ·  Pan: drag  ·  Zoom: wheel\nMapped: %d / %d" % [_season_name(turn), location, status, explored_tiles.size(), WORLD_MAP_SCRIPT.WORLD_WIDTH * WORLD_MAP_SCRIPT.WORLD_HEIGHT]
+	var location := "Spring" if tile in WORLD_MAP_SCRIPT.SPRING_TILES else ("Waterhole" if tile == WORLD_MAP_SCRIPT.SEASONAL_WATERHOLE_TILE else terrain.capitalize())
+	action_label.text = "%s  ·  %s  ·  %s\nRange: %d / %d tiles  ·  Mapped: %d / %d\nMove: click/WASD  ·  Pan: drag  ·  Zoom: wheel" % [_season_name(turn), location, status, moves_remaining, _max_travel_range(), explored_tiles.size(), WORLD_MAP_SCRIPT.WORLD_WIDTH * WORLD_MAP_SCRIPT.WORLD_HEIGHT]
 	_refresh_season_button(tile)
 
 	var blocker := _season_action_blocker()
+	var tile_id: int = world.tile_id(tile)
 	var forage_yield := _forage_food_gain(tile)
 	forage_button.text = "Forage +%d" % forage_yield
 	forage_button.disabled = not blocker.is_empty() or forage_yield == 0
@@ -1179,30 +1342,39 @@ func _refresh_action_label() -> void:
 	if blocker.is_empty():
 		if food == 100:
 			forage_button.tooltip_text = "Food stores are full."
+		elif depleted_tiles.has(tile_id):
+			forage_button.tooltip_text = "Foraged recently — recovers in %d season(s)." % int(depleted_tiles[tile_id])
 		elif forage_yield == 0:
 			forage_button.tooltip_text = "Find land to forage."
 		else:
-			forage_button.tooltip_text = "Gather %d food here and gain up to 2 cohesion." % forage_yield
-			if knowledge >= FORAGE_KNOWLEDGE_THRESHOLD:
-				forage_button.tooltip_text += " Includes up to %d extra food from knowledge." % FORAGE_KNOWLEDGE_BONUS
+			forage_button.tooltip_text = "Gather %d food here and gain up to 2 cohesion. Patch rests after foraging." % forage_yield
 
 	var new_tiles := _unmapped_scout_tiles(tile) if blocker.is_empty() else 0
 	scout_button.disabled = not blocker.is_empty() or new_tiles == 0
 	scout_button.tooltip_text = blocker
 	if blocker.is_empty():
-		scout_button.tooltip_text = "Chart %d new tiles and gain up to 9 knowledge." % new_tiles if new_tiles > 0 else "Move closer to unmapped terrain to scout."
+		scout_button.tooltip_text = "Chart %d new tiles (radius %d) and gain up to 9 knowledge." % [new_tiles, _scout_radius()] if new_tiles > 0 else "Move closer to unmapped terrain to scout."
 
-	learn_button.disabled = not blocker.is_empty() or food < 8 or knowledge >= 99
+	var practice_cost := _practice_food_cost(tile)
+	learn_button.text = "Practice −%d" % practice_cost
+	learn_button.disabled = not blocker.is_empty() or food < practice_cost or knowledge >= 99
 	learn_button.tooltip_text = blocker
 	if blocker.is_empty():
 		if knowledge >= 99:
 			learn_button.tooltip_text = "Knowledge is at its maximum."
-		elif food < 8:
-			learn_button.tooltip_text = "Learning requires 8 food."
+		elif food < practice_cost:
+			learn_button.tooltip_text = "Practicing requires %d food here." % practice_cost
 		else:
-			learn_button.tooltip_text = "Spend 8 food to gain up to 15 knowledge."
-			if knowledge < FORAGE_KNOWLEDGE_THRESHOLD:
-				learn_button.tooltip_text += " At %d knowledge, forage yields rise by %d." % [FORAGE_KNOWLEDGE_THRESHOLD, FORAGE_KNOWLEDGE_BONUS]
+			learn_button.tooltip_text = "Spend %d food to gain up to 15 knowledge for Skills." % practice_cost
+
+	var ready_skills := 0
+	for skill in TECH_TREE_SCRIPT.SKILLS:
+		if TECH_TREE_SCRIPT.can_learn(skill, learned_skills, discovered_landmark_names, turn, knowledge, blocker).is_empty():
+			ready_skills += 1
+	skills_button.text = "Skills %d/9" % learned_skills.size() if ready_skills == 0 else "Skills •%d" % ready_skills
+	skills_button.tooltip_text = "Inspect or learn skills with unspent knowledge (%d available)." % knowledge
+	if is_instance_valid(skills_overlay) and skills_overlay.visible:
+		_refresh_skills_panel()
 
 	var kinship_blocker := _kinship_blocker()
 	kinship_button.disabled = not blocker.is_empty() or not kinship_blocker.is_empty()
@@ -1211,6 +1383,40 @@ func _refresh_action_label() -> void:
 		kinship_button.tooltip_text = "Spend 5 food to record shared descendants and gain up to 6 cohesion."
 
 	_refresh_mate_button(blocker)
+
+
+func _refresh_skills_panel() -> void:
+	if not is_instance_valid(skills_header_label):
+		return
+	var blocker := _season_action_blocker()
+	skills_header_label.text = "Unspent Knowledge: %d   ◇   Learned: %d / %d" % [knowledge, learned_skills.size(), TECH_TREE_SCRIPT.SKILLS.size()]
+	for skill in TECH_TREE_SCRIPT.SKILLS:
+		var skill_id: String = skill["id"]
+		var card: Dictionary = skill_cards[skill_id]
+		var bg: ColorRect = card["bg"]
+		var req_label: Label = card["req"]
+		var btn: Button = card["button"]
+		if _has_skill(skill_id):
+			bg.color = Color("#243d34")
+			req_label.text = "Learned"
+			req_label.add_theme_color_override("font_color", Color("#9fd4a7"))
+			btn.text = "Learned"
+			btn.disabled = true
+			btn.tooltip_text = "Active for the rest of this chronicle."
+			continue
+		var missing: Array[String] = TECH_TREE_SCRIPT.unmet_requirements(skill, learned_skills, discovered_landmark_names, turn)
+		var learn_blocker: String = TECH_TREE_SCRIPT.can_learn(skill, learned_skills, discovered_landmark_names, turn, knowledge, blocker)
+		if missing.is_empty():
+			bg.color = Color("#1f332c") if learn_blocker.is_empty() else Color("#1d2e29")
+			req_label.text = "Ready to learn" if knowledge >= int(skill["cost"]) else "Need %d knowledge" % int(skill["cost"])
+			req_label.add_theme_color_override("font_color", Color("#e8c882") if knowledge >= int(skill["cost"]) else Color("#a7b3a8"))
+		else:
+			bg.color = Color("#182522")
+			req_label.text = " · ".join(missing)
+			req_label.add_theme_color_override("font_color", Color("#c79b70"))
+		btn.text = "Learn (−%d K)" % int(skill["cost"])
+		btn.disabled = not learn_blocker.is_empty()
+		btn.tooltip_text = learn_blocker if btn.disabled else "Spend %d knowledge and this season's action to learn %s." % [int(skill["cost"]), skill["name"]]
 
 
 func _refresh_mate_button(action_blocker: String) -> void:
@@ -1254,7 +1460,11 @@ func _set_player_destination(tile: Vector2i, announce := true, direct := false) 
 		return
 	if announce:
 		movement_key = KEY_NONE
-	if not _route_actor_to(player_actor, tile, direct):
+	if moves_remaining <= 0:
+		if announce:
+			_show_toast("Travel range spent for this season. Pass the season to rest.")
+		return
+	if not _route_actor_to(player_actor, tile, direct, moves_remaining):
 		if announce:
 			var message := "Pick a destination on land." if not world.has_land_route_point(tile) else "No land route leads there."
 			_show_toast(message)
@@ -1283,6 +1493,13 @@ func _continue_keyboard_movement(delta: float) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		if is_instance_valid(skills_overlay) and skills_overlay.visible:
+			_on_toggle_skills()
+			get_viewport().set_input_as_handled()
+		return
+	if is_instance_valid(skills_overlay) and skills_overlay.visible:
+		return
 	if event is InputEventMouseButton and event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 		if MAP_VIEW.has_point(event.position):
 			var factor := 1.15 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1.0 / 1.15
