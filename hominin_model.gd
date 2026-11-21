@@ -24,6 +24,7 @@ var gait_weight := 0.0
 var model_opacity := 1.0
 var textured_materials: Array[ShaderMaterial] = []
 var detail_materials: Array[StandardMaterial3D] = []
+var _mesh_batches: Dictionary = {}
 
 const STANCE_FRACTION := 0.60
 const FOOT_RADIUS := 0.05
@@ -306,6 +307,7 @@ func _build_body() -> void:
 			Vector4(0.66, 0.133, 0.105, 0.005)
 		])
 		_add_loft(upper_body, "WovenHideWrap", loincloth_profile, cloth, 12)
+	_flush_batches()
 
 func _add_head(parent: Node3D, skin: Material, face: Material, shadow_skin: Material, hair: StandardMaterial3D, eye: StandardMaterial3D) -> void:
 	var female := body_variant % 3 == 1
@@ -359,15 +361,42 @@ func _add_head(parent: Node3D, skin: Material, face: Material, shadow_skin: Mate
 		_add_segment(parent, Vector3(0.0, 1.730, -0.040), Vector3(0.0, 1.800, -0.040), 0.025, 0.008, skin)
 		_add_ellipsoid(parent, "SagittalCrest", Vector3(0.0, 1.775, -0.022), Vector3(0.018, 0.040, 0.090), hair)
 
-func _add_loft(parent: Node3D, label: String, profile: PackedVector4Array, material: Material, sides: int) -> void:
+func _get_batch(parent: Node3D, material: Material) -> SurfaceTool:
+	var key := "%d:%d" % [parent.get_instance_id(), material.get_instance_id()]
+	if not _mesh_batches.has(key):
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		_mesh_batches[key] = {"parent": parent, "material": material, "st": st}
+	return _mesh_batches[key]["st"]
+
+
+func _append_primitive(parent: Node3D, mesh: PrimitiveMesh, xform: Transform3D, material: Material) -> void:
+	var st := _get_batch(parent, material)
+	st.append_from(mesh, 0, xform)
+
+
+func _flush_batches() -> void:
+	for entry in _mesh_batches.values():
+		var st: SurfaceTool = entry["st"]
+		st.index()
+		var mesh := st.commit()
+		var instance := MeshInstance3D.new()
+		instance.mesh = mesh
+		instance.material_override = entry["material"]
+		entry["parent"].add_child(instance)
+	_mesh_batches.clear()
+
+
+func _add_loft(parent: Node3D, _label: String, profile: PackedVector4Array, material: Material, sides: int) -> void:
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var lo_sides := maxi(10, int(roundf(sides * 0.72)))
 	for ring in range(profile.size() - 1):
 		var lower: Vector4 = profile[ring]
 		var upper: Vector4 = profile[ring + 1]
-		for side in range(sides):
-			var a0 := TAU * float(side) / float(sides)
-			var a1 := TAU * float(side + 1) / float(sides)
+		for side in range(lo_sides):
+			var a0 := TAU * float(side) / float(lo_sides)
+			var a1 := TAU * float(side + 1) / float(lo_sides)
 			var p00 := Vector3(cos(a0) * lower.y, lower.x, lower.w + sin(a0) * lower.z)
 			var p01 := Vector3(cos(a0) * upper.y, upper.x, upper.w + sin(a0) * upper.z)
 			var p10 := Vector3(cos(a1) * lower.y, lower.x, lower.w + sin(a1) * lower.z)
@@ -380,12 +409,9 @@ func _add_loft(parent: Node3D, label: String, profile: PackedVector4Array, mater
 			surface.add_vertex(p11)
 	surface.index()
 	surface.generate_normals()
-	var mesh := surface.commit()
-	mesh.surface_set_material(0, material)
-	var instance := MeshInstance3D.new()
-	instance.name = label
-	instance.mesh = mesh
-	parent.add_child(instance)
+	var committed := surface.commit()
+	_get_batch(parent, material).append_from(committed, 0, Transform3D.IDENTITY)
+
 
 func _add_segment(parent: Node3D, start: Vector3, finish: Vector3, radius_start: float, radius_finish: float, material: Material) -> void:
 	var direction := finish - start
@@ -395,40 +421,32 @@ func _add_segment(parent: Node3D, start: Vector3, finish: Vector3, radius_start:
 	cylinder.top_radius = radius_start
 	cylinder.bottom_radius = radius_finish
 	cylinder.height = direction.length()
-	cylinder.radial_segments = 12
+	cylinder.radial_segments = 6 if maxf(radius_start, radius_finish) < 0.025 else 8
 	cylinder.rings = 1
-	var instance := MeshInstance3D.new()
-	instance.mesh = cylinder
-	instance.material_override = material
-	instance.position = (start + finish) * 0.5
-	instance.quaternion = Quaternion(Vector3.UP, direction.normalized())
-	parent.add_child(instance)
+	var xform := Transform3D(Basis(Quaternion(Vector3.UP, direction.normalized())), (start + finish) * 0.5)
+	_append_primitive(parent, cylinder, xform, material)
 
-func _add_ellipsoid(parent: Node3D, label: String, center: Vector3, radii: Vector3, material: Material) -> void:
+
+func _add_ellipsoid(parent: Node3D, _label: String, center: Vector3, radii: Vector3, material: Material) -> void:
 	var sphere := SphereMesh.new()
 	sphere.radius = 1.0
 	sphere.height = 2.0
-	sphere.radial_segments = 16
-	sphere.rings = 10
-	var instance := MeshInstance3D.new()
-	instance.name = label
-	instance.mesh = sphere
-	instance.material_override = material
-	instance.position = center
-	instance.scale = radii
-	parent.add_child(instance)
+	var max_r := maxf(radii.x, maxf(radii.y, radii.z))
+	sphere.radial_segments = 8 if max_r < 0.05 else 10
+	sphere.rings = 5 if max_r < 0.05 else 6
+	var xform := Transform3D(Basis.from_scale(radii), center)
+	_append_primitive(parent, sphere, xform, material)
+
 
 func _add_foot(parent: Node3D, material: Material) -> Node3D:
 	var ankle := _make_pivot(parent, Vector3(0.0, -0.31, 0.0), "Ankle")
 	var foot := CapsuleMesh.new()
 	foot.radius = FOOT_RADIUS
 	foot.height = 2.0 * (FOOT_RADIUS + FOOT_HALF_SEGMENT)
-	var instance := MeshInstance3D.new()
-	instance.mesh = foot
-	instance.material_override = material
-	instance.rotation.x = PI * 0.5
-	instance.position = Vector3(0.0, 0.0, FOOT_CENTER)
-	ankle.add_child(instance)
+	foot.radial_segments = 8
+	foot.rings = 4
+	var xform := Transform3D(Basis(Vector3.RIGHT, PI * 0.5), Vector3(0.0, 0.0, FOOT_CENTER))
+	_append_primitive(ankle, foot, xform, material)
 	return ankle
 func _add_hand(parent: Node3D, wrist: Vector3, material: Material) -> void:
 	var palm_end := wrist + Vector3(0.0, -0.050, 0.030)

@@ -13,6 +13,7 @@ var is_predator := false
 var is_moving := false
 var opaque_materials: Dictionary = {}
 var fade_materials: Dictionary[StandardMaterial3D, StandardMaterial3D] = {}
+var _mesh_batches: Dictionary = {}
 
 func configure(species_name: String, phase: float) -> void:
 	species = species_name
@@ -257,6 +258,7 @@ func _build() -> void:
 	_add_segment(tail, Vector3.ZERO, tail_joint, 0.028, 0.023, coat)
 	_add_segment(tail, tail_joint, tail_tip, 0.023, 0.013, coat)
 	_add_ellipsoid(tail, "TailTip", tail_tip, Vector3(0.031, 0.042, 0.035), dark)
+	_flush_batches()
 	figure.scale = Vector3.ONE * animal_scale
 
 func _build_trunk(coat: Material, ivory: Material) -> void:
@@ -340,30 +342,46 @@ func _pivot(parent: Node3D, point: Vector3, label: String) -> Node3D:
 	parent.add_child(node)
 	return node
 
+func _get_batch(parent: Node3D, material: Material) -> SurfaceTool:
+	var key := "%d:%d" % [parent.get_instance_id(), material.get_instance_id()]
+	if not _mesh_batches.has(key):
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		_mesh_batches[key] = {"parent": parent, "material": material, "st": st}
+	return _mesh_batches[key]["st"]
+
+
+func _flush_batches() -> void:
+	for entry in _mesh_batches.values():
+		var st: SurfaceTool = entry["st"]
+		st.index()
+		var mesh := st.commit()
+		var instance := MeshInstance3D.new()
+		instance.mesh = mesh
+		instance.material_override = entry["material"]
+		entry["parent"].add_child(instance)
+	_mesh_batches.clear()
+
+
 func _add_segment(parent: Node3D, start: Vector3, finish: Vector3, radius_start: float, radius_end: float, material: Material) -> void:
 	var direction := finish - start
+	if direction.length_squared() < 0.000001:
+		return
 	var mesh := CylinderMesh.new()
 	mesh.top_radius = radius_end
 	mesh.bottom_radius = radius_start
 	mesh.height = direction.length()
-	mesh.radial_segments = 10
-	var instance := MeshInstance3D.new()
-	instance.mesh = mesh
-	instance.material_override = material
-	instance.position = (start + finish) * 0.5
-	instance.quaternion = Quaternion(Vector3.UP, direction.normalized())
-	parent.add_child(instance)
+	mesh.radial_segments = 7
+	mesh.rings = 1
+	var xform := Transform3D(Basis(Quaternion(Vector3.UP, direction.normalized())), (start + finish) * 0.5)
+	_get_batch(parent, material).append_from(mesh, 0, xform)
 
-func _add_ellipsoid(parent: Node3D, label: String, center: Vector3, radii: Vector3, material: Material) -> void:
+
+func _add_ellipsoid(parent: Node3D, _label: String, center: Vector3, radii: Vector3, material: Material) -> void:
 	var mesh := SphereMesh.new()
 	mesh.radius = 1.0
 	mesh.height = 2.0
-	mesh.radial_segments = 12
-	mesh.rings = 8
-	var instance := MeshInstance3D.new()
-	instance.name = label
-	instance.mesh = mesh
-	instance.material_override = material
-	instance.position = center
-	instance.scale = radii
-	parent.add_child(instance)
+	mesh.radial_segments = 8
+	mesh.rings = 5
+	var xform := Transform3D(Basis.from_scale(radii), center)
+	_get_batch(parent, material).append_from(mesh, 0, xform)

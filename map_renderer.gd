@@ -17,6 +17,21 @@ func draw_world(canvas: CanvasItem, width: float, height: float) -> void:
 		canvas.draw_line(Vector2(0, y), Vector2(width, y), Color(0.8, 0.76, 0.63, alpha), 1)
 
 
+func draw_baked_chunk(
+	canvas: CanvasItem,
+	x0: int,
+	y0: int,
+	x1: int,
+	y1: int,
+	discovered_landmarks: Dictionary,
+	is_dry_season := false,
+	depleted_tiles: Dictionary = {},
+	wildfire_tiles: Dictionary = {}
+) -> void:
+	draw_ground_chunk(canvas, x0, y0, x1, y1, is_dry_season, depleted_tiles, wildfire_tiles)
+	draw_scenery_chunk(canvas, x0, y0, x1, y1, discovered_landmarks, is_dry_season, depleted_tiles, wildfire_tiles)
+
+
 func draw_ground_chunk(
 	canvas: CanvasItem,
 	x0: int,
@@ -59,7 +74,7 @@ func draw_scenery_chunk(
 			var id := world.tile_id(tile)
 			var fire_info: Dictionary = wildfire_tiles.get(id, {})
 			if fire_info.is_empty():
-				_draw_terrain_details(canvas, center, world.terrain_at(tile), x, y)
+				_draw_terrain_details(canvas, center, world.terrain_at(tile), x, y, is_dry_season)
 			else:
 				_draw_wildfire_details(canvas, center, fire_info, x, y)
 			if depleted_tiles.has(id):
@@ -309,7 +324,7 @@ func _draw_terrain_ground(canvas: CanvasItem, center: Vector2, tile: Vector2i, t
 		canvas.draw_line(center + ripple[0], center + ripple[1], Color("#b3d7c5", 0.20), 0.8, true)
 
 
-func _draw_terrain_details(canvas: CanvasItem, center: Vector2, terrain: String, x: int, y: int) -> void:
+func _draw_terrain_details(canvas: CanvasItem, center: Vector2, terrain: String, x: int, y: int, is_dry_season := false) -> void:
 	var shore := world.get_shoreline(Vector2i(x, y))
 	if not shore.is_empty():
 		_draw_shoreline_details(canvas, center, shore, x, y)
@@ -317,9 +332,9 @@ func _draw_terrain_details(canvas: CanvasItem, center: Vector2, terrain: String,
 	var variation := world.tile_noise(x, y, 202)
 	match terrain:
 		"highland":
-			_draw_mountain_tile(canvas, center, x, y, variation)
+			_draw_civ3_hills_tile(canvas, center, x, y, variation, is_dry_season)
 		"volcanic":
-			_draw_volcanic_tile(canvas, center, variation)
+			_draw_volcanic_tile(canvas, center, x, y, variation, is_dry_season)
 		"dryland":
 			canvas.draw_colored_polygon(PackedVector2Array([
 				center + Vector2(-21, 8), center + Vector2(-5, -8),
@@ -557,82 +572,148 @@ func _draw_tree(canvas: CanvasItem, point: Vector2, size: float) -> void:
 	_draw_leaf_texture(canvas, point + Vector2(1, -14) * scale, Vector2(4.0, 3.2) * scale, Color("#6c8051"), 10)
 
 
-func _draw_mountain_tile(canvas: CanvasItem, center: Vector2, x: int, y: int, variation: float) -> void:
+func _draw_civ3_hills_tile(canvas: CanvasItem, center: Vector2, x: int, y: int, variation: float, is_dry_season: bool) -> void:
 	var relief := world.terrain_noise.get_noise_2d(x - 9, y + 15)
-	var height := 38.0 + relief * 15.0 + variation * 18.0
-	var lean := lerpf(-6.0, 7.0, world.tile_noise(x, y, 225))
-	_draw_mountain_peak(canvas, center + Vector2(16, -6), 23.0, height * 0.72, -lean, x, y, 0)
-	_draw_mountain_peak(canvas, center + Vector2(-9, 4), 32.0, height, lean, x, y, 1)
-	if variation > 0.45:
-		_draw_mountain_peak(canvas, center + Vector2(21, 12), 19.0, height * 0.57, lean * 0.5, x, y, 2)
+	var n_up: bool = world.terrain_at(Vector2i(x, y - 1)) == "highland"
+	var n_right: bool = world.terrain_at(Vector2i(x + 1, y)) == "highland"
+	var n_down: bool = world.terrain_at(Vector2i(x, y + 1)) == "highland"
+	var n_left: bool = world.terrain_at(Vector2i(x - 1, y)) == "highland"
+	var neighbors := int(n_up) + int(n_right) + int(n_down) + int(n_left)
+
+	# Warm Civ-3 style sunlit olive-ochre hills shifting slightly golden in Dry seasons.
+	var lit := Color("#b7ad72") if not is_dry_season else Color("#c6ae73")
+	var mid := Color("#888856") if not is_dry_season else Color("#9a8b5a")
+	var shade := Color("#555c47") if not is_dry_season else Color("#655b48")
+	var skirt := Color("#7d7c54") if not is_dry_season else Color("#8f8358")
+
+	# Connect seamlessly to adjacent highland tiles with low bridging saddles.
+	if n_up:
+		_draw_hill_dome(canvas, center + Vector2(20, -10), 26.0, 14.0, -2.0, lit.darkened(0.04), mid, shade, skirt, false)
+	if n_left:
+		_draw_hill_dome(canvas, center + Vector2(-21, -9), 26.0, 14.0, 2.0, lit, mid, shade, skirt, false)
+
+	var base_h := 20.0 + relief * 6.0 + variation * 7.0
+	var lean := lerpf(-4.5, 4.5, world.tile_noise(x, y, 225))
+	# Back rolling swell (soft secondary hill behind the hero mound).
+	_draw_hill_dome(canvas, center + Vector2(16, -4), 29.0, base_h * 0.86, -lean * 0.6, lit.darkened(0.03), mid, shade, skirt, false)
+
+	if neighbors >= 3:
+		# Inner escarpment crest: taller broad-shouldered weathered ridge rising above foothills.
+		var rock_lit := Color("#cec1a1") if not is_dry_season else Color("#d6c29d")
+		var rock_mid := Color("#998e77")
+		var rock_shade := Color("#5c564f")
+		_draw_hill_dome(canvas, center + Vector2(-4, 2), 37.0, base_h + 14.0, lean * 0.7, rock_lit, rock_mid, rock_shade, skirt, true)
+		_draw_hill_dome(canvas, center + Vector2(-17, 10), 24.0, base_h * 0.68, -2.0, lit, mid, shade, skirt, false)
+	else:
+		# Classic Civ 3 rolling grassy hill: wide rounded dome with gentle front knoll.
+		_draw_hill_dome(canvas, center + Vector2(-7, 5), 35.0, base_h, lean, lit, mid, shade, skirt, false)
+		if variation > 0.35:
+			_draw_hill_dome(canvas, center + Vector2(18, 10), 23.0, base_h * 0.62, lean * 0.4, lit, mid, shade, skirt, false)
+
+	if n_right:
+		_draw_hill_dome(canvas, center + Vector2(22, 11), 24.0, 13.0, -1.5, lit, mid, shade, skirt, false)
+	if n_down:
+		_draw_hill_dome(canvas, center + Vector2(-19, 12), 24.0, 13.0, 1.5, lit, mid, shade, skirt, false)
+
+	# Small painterly limestone rock & slope grass details on the hill brow.
+	if variation > 0.55:
+		_draw_boulder(canvas, center + Vector2(-13, 3), 0.55)
+	_draw_grass(canvas, center + Vector2(8, 8), Color("#6d7949", 0.72))
 
 
-func _draw_mountain_peak(canvas: CanvasItem, base: Vector2, width: float, height: float, lean: float, x: int, y: int, peak_index: int) -> void:
-	var salt := 400 + peak_index * 80
-	var summit := base + Vector2(lean, -height)
-	var feet := PackedVector2Array([
-		base + Vector2(-width, 0),
-		base + Vector2(-width * 0.53, 5),
-		base + Vector2(-width * 0.16, 2),
-		base + Vector2(width * 0.14, 10),
-		base + Vector2(width * 0.46, 4),
-		base + Vector2(width, 0)
-	])
-	var rock_colors := [
-		Color("#aaa18a"), Color("#d0c1a4"), Color("#857b70"),
-		Color("#554e4c"), Color("#73675e")
-	]
-	var shoulders := PackedVector2Array()
-	for i in range(feet.size()):
-		var depth := lerpf(0.42, 0.68, world.tile_noise(x, y, salt + i))
-		var shoulder := summit.lerp(feet[i], depth)
-		shoulder.x += lerpf(-3.0, 3.0, world.tile_noise(x, y, salt + 6 + i))
-		shoulders.append(shoulder)
+func _draw_hill_dome(
+	canvas: CanvasItem,
+	base: Vector2,
+	radius_x: float,
+	height: float,
+	lean: float,
+	lit: Color,
+	mid: Color,
+	shade: Color,
+	skirt: Color,
+	rocky: bool
+) -> void:
+	# Soft grounding shadow shifted toward the SE away from the NW sun.
+	draw_ellipse_shadow(canvas, base + Vector2(5.0, 3.0), Vector2(radius_x * 0.96, radius_x * 0.28), 0.20)
 
-	for i in range(rock_colors.size()):
-		var rock: Color = rock_colors[i]
-		var left := shoulders[i]
-		var right := shoulders[i + 1]
-		canvas.draw_polygon(
-			PackedVector2Array([summit, left, right]),
-			PackedColorArray([rock.lightened(0.26), rock, rock.darkened(0.08)])
-		)
-		# Split each lower face to keep the ridges angular as they meet the scree.
-		var foot_color := Color("#817b58").lerp(rock, 0.22)
-		canvas.draw_polygon(
-			PackedVector2Array([left, feet[i], right]),
-			PackedColorArray([rock, foot_color, rock.darkened(0.11)])
-		)
-		canvas.draw_polygon(
-			PackedVector2Array([right, feet[i], feet[i + 1]]),
-			PackedColorArray([rock.darkened(0.11), foot_color, foot_color.darkened(0.08)])
-		)
-		for j in range(6):
-			var grain := salt + 12 + i * 12 + j * 2
-			var depth := lerpf(0.27, 0.94, world.tile_noise(x, y, grain))
-			var across := lerpf(0.15, 0.75, world.tile_noise(x, y, grain + 1))
-			var start := left.lerp(right, across)
-			var end := feet[i].lerp(feet[i + 1], across)
-			var point := summit.lerp(start, depth * 2.0) if depth < 0.5 else start.lerp(end, depth * 2.0 - 1.0)
-			var ink := Color("#eee1c7", 0.42) if (i + j) % 3 == 0 else Color("#352f2b", 0.32)
-			canvas.draw_line(point, point + Vector2(1.5, 2.0), ink, 0.85, true)
+	var steps := 14
+	var ridge := PackedVector2Array()
+	var lower := PackedVector2Array()
+
+	for i in range(steps + 1):
+		var t := float(i) / float(steps)
+		var u := t * 2.0 - 1.0 # -1 (left) .. +1 (right)
+		# Smooth raised-cosine bell curve gives Civ 3's rounded rolling hill silhouette.
+		var bell := pow(0.5 * (1.0 + cos(u * PI)), 0.85 if rocky else 1.12)
+		var px := base.x + u * radius_x + lean * bell
+		var py := base.y - height * bell
+		ridge.append(Vector2(px, py))
+		# Curved bottom apron tucks gently into the isometric diamond.
+		var apron_y := base.y + sin(t * PI) * (radius_x * 0.24)
+		lower.append(Vector2(base.x + u * radius_x, apron_y))
+
+	# Paint smooth directional gradient across strictly convex vertical strips (NW sunlit -> SE shaded).
+	for i in range(steps):
+		var t0 := float(i) / float(steps)
+		var t1 := float(i + 1) / float(steps)
+		var ridge_col0 := lit.lerp(mid, smoothstep(0.18, 0.56, t0)).lerp(shade, smoothstep(0.48, 0.90, t0)).lightened(0.10 * (1.0 - smoothstep(0.25, 0.72, t0)))
+		var ridge_col1 := lit.lerp(mid, smoothstep(0.18, 0.56, t1)).lerp(shade, smoothstep(0.48, 0.90, t1)).lightened(0.10 * (1.0 - smoothstep(0.25, 0.72, t1)))
+		var mid_col0 := lit.lerp(mid, smoothstep(0.15, 0.52, t0)).lerp(shade, smoothstep(0.46, 0.88, t0))
+		var mid_col1 := lit.lerp(mid, smoothstep(0.15, 0.52, t1)).lerp(shade, smoothstep(0.46, 0.88, t1))
+		var skirt_col0 := skirt.lerp(mid_col0, 0.42)
+		var skirt_col1 := skirt.lerp(mid_col1, 0.42)
+
+		if i == 0:
+			canvas.draw_polygon(
+				PackedVector2Array([ridge[0], ridge[1], lower[1]]),
+				PackedColorArray([skirt_col0, ridge_col1, skirt_col1])
+			)
+		elif i == steps - 1:
+			canvas.draw_polygon(
+				PackedVector2Array([ridge[i], ridge[i + 1], lower[i]]),
+				PackedColorArray([ridge_col0, skirt_col1, skirt_col0])
+			)
+		else:
+			var m0 := ridge[i].lerp(lower[i], 0.48)
+			var m1 := ridge[i + 1].lerp(lower[i + 1], 0.48)
+			canvas.draw_polygon(
+				PackedVector2Array([ridge[i], ridge[i + 1], m1, m0]),
+				PackedColorArray([ridge_col0, ridge_col1, mid_col1, mid_col0])
+			)
+			canvas.draw_polygon(
+				PackedVector2Array([m0, m1, lower[i + 1], lower[i]]),
+				PackedColorArray([mid_col0, mid_col1, skirt_col1, skirt_col0])
+			)
+
+	# Sunlit NW highlight arc along the brow & soft SE contour fold.
+	var brow := PackedVector2Array()
+	for i in range(2, 7):
+		brow.append(ridge[i].lerp(lower[i], 0.16))
+	if brow.size() >= 2:
+		canvas.draw_polyline(brow, lit.lightened(0.24) * Color(1, 1, 1, 0.55), 1.4, true)
+	var shadow_fold := PackedVector2Array()
+	for i in range(8, steps):
+		shadow_fold.append(ridge[i].lerp(lower[i], 0.34))
+	if shadow_fold.size() >= 2:
+		canvas.draw_polyline(shadow_fold, shade.darkened(0.25) * Color(1, 1, 1, 0.45), 1.3, true)
+	if rocky:
+		var crown := ridge[steps / 2].lerp(lower[steps / 2], 0.28)
+		canvas.draw_line(crown + Vector2(-8, 2), crown + Vector2(5, 5), Color("#ebe0c5", 0.42), 1.1, true)
+		canvas.draw_line(crown + Vector2(-12, 8), crown + Vector2(2, 11), Color("#46403a", 0.36), 1.1, true)
 
 
-func _draw_volcanic_tile(canvas: CanvasItem, center: Vector2, variation: float) -> void:
-	var peak_height := 15.0 + variation * 8.0
-	var peak := center + Vector2(-2, -peak_height)
-	var distant_peak := center + Vector2(22, -peak_height * 0.58)
-	canvas.draw_colored_polygon(PackedVector2Array([
-		center + Vector2(2, 10), distant_peak, center + Vector2(34, 11)
-	]), Color("#796952"))
-	canvas.draw_colored_polygon(PackedVector2Array([
-		center + Vector2(-30, 10), peak, center + Vector2(10, 11)
-	]), Color("#96795e"))
-	canvas.draw_colored_polygon(PackedVector2Array([
-		peak, center + Vector2(25, 9), center + Vector2(10, 11)
-	]), Color("#554d43"))
-	canvas.draw_line(peak, center + Vector2(-8, 3), Color("#d4c6a1", 0.8), 1.5, true)
-	canvas.draw_arc(center + Vector2(0, -peak_height + 4), 4.0, PI, TAU, 10, Color("#bd6848"), 1.6)
+func _draw_volcanic_tile(canvas: CanvasItem, center: Vector2, x: int, y: int, variation: float, is_dry_season: bool) -> void:
+	var h := 18.0 + variation * 9.0
+	var lean := lerpf(-3.0, 3.0, world.tile_noise(x, y, 311))
+	var lit := Color("#a58869") if not is_dry_season else Color("#b3926d")
+	var mid := Color("#766353")
+	var shade := Color("#473f39")
+	var skirt := Color("#7f6954")
+	_draw_hill_dome(canvas, center + Vector2(18, -3), 22.0, h * 0.65, -lean, lit.darkened(0.08), mid, shade, skirt, true)
+	_draw_hill_dome(canvas, center + Vector2(-4, 6), 31.0, h, lean, lit, mid, shade, skirt, true)
+	# Subtle weathered caldera rim at the summit.
+	var rim := center + Vector2(-4 + lean, 6 - h + 3.0)
+	canvas.draw_arc(rim, 4.5, PI, TAU, 10, Color("#bf6b4a", 0.85), 1.5, true)
 
 
 func _draw_grass(canvas: CanvasItem, point: Vector2, color: Color) -> void:

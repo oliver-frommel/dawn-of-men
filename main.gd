@@ -176,11 +176,11 @@ var hominin_viewport: SubViewport
 var hominin_stage: Node3D
 var hominin_models: Array[Node3D] = []
 var map_root: Node2D
-var ground_chunks: Array[LayerNode] = []
-var scenery_chunks: Array[LayerNode] = []
+var map_chunks: Array[Dictionary] = []
 var chunk_bounds: Array[Rect2] = []
 var dynamic_world_layer: LayerNode
 var overlay_layer: LayerNode
+var ui_refresh_timer := 0.0
 var wildlife: Array[Dictionary] = []
 var wildlife_epoch := -1
 var explored_tiles: Dictionary = {}
@@ -297,7 +297,9 @@ func _process(delta: float) -> void:
 	var picked_up := _check_collectible_pickups()
 	var task_changed := _update_active_task(sim_delta)
 	_advance_clock(sim_delta)
-	if moved or bands_moved or wildlife_changed or picked_up:
+	ui_refresh_timer += delta
+	if picked_up or ((moved or bands_moved or wildlife_changed) and ui_refresh_timer >= 0.20):
+		ui_refresh_timer = 0.0
 		_refresh_action_label()
 	if wildlife_changed or moved or bands_need_redraw or task_changed or texts_changed or picked_up:
 		_redraw_dynamic()
@@ -509,7 +511,7 @@ func _build_hominin_viewport() -> void:
 	hominin_viewport.transparent_bg = true
 	hominin_viewport.own_world_3d = true
 	hominin_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	hominin_viewport.msaa_3d = Viewport.MSAA_2X
+	hominin_viewport.msaa_3d = Viewport.MSAA_DISABLED
 	add_child(hominin_viewport)
 
 	var environment_node := WorldEnvironment.new()
@@ -600,6 +602,10 @@ func _sync_hominin_band(actor: Dictionary, band_index: int, player_controlled: b
 					break
 				ground = center.lerp(ground, 0.5)
 		var screen := _world_to_screen(ground)
+		var on_screen := MAP_VIEW.grow(110.0 * zoom_level).has_point(screen)
+		model.visible = on_screen and opacity > 0.0
+		if not model.visible:
+			continue
 		var local := screen - MAP_VIEW.position
 		model.position = Vector3(local.x / 45.0, (MAP_VIEW.size.y - local.y) / 45.0, screen.y / MAP_VIEW.size.y * 0.02)
 		model.scale = Vector3.ONE * 0.55 * zoom_level
@@ -920,8 +926,12 @@ func _tick_carcass_sites() -> void:
 
 func _position_wildlife_model(animal: Dictionary) -> void:
 	var screen := _world_to_screen(animal["at"])
-	var local := screen - MAP_VIEW.position
 	var model: Node3D = animal["model"]
+	var on_screen := MAP_VIEW.grow(110.0 * zoom_level).has_point(screen)
+	model.visible = on_screen and float(animal["opacity"]) > 0.0
+	if not model.visible:
+		return
+	var local := screen - MAP_VIEW.position
 	model.position = Vector3(local.x / 45.0, (MAP_VIEW.size.y - local.y) / 45.0, screen.y / MAP_VIEW.size.y * 0.02)
 	model.scale = Vector3.ONE * 0.68 * zoom_level
 
@@ -1099,19 +1109,14 @@ func _build_map_layers() -> void:
 	map_root.name = "MapRoot"
 	add_child(map_root)
 
-	var ground_root := Node2D.new()
-	ground_root.name = "GroundChunks"
-	map_root.add_child(ground_root)
+	var chunk_root := Node2D.new()
+	chunk_root.name = "BakedChunks"
+	map_root.add_child(chunk_root)
 
-	var scenery_root := Node2D.new()
-	scenery_root.name = "SceneryChunks"
-	map_root.add_child(scenery_root)
-
-	ground_chunks.resize(CHUNK_COLS * CHUNK_ROWS)
-	scenery_chunks.resize(CHUNK_COLS * CHUNK_ROWS)
+	map_chunks.resize(CHUNK_COLS * CHUNK_ROWS)
 	chunk_bounds.resize(CHUNK_COLS * CHUNK_ROWS)
 
-	# Add chunks in isometric diagonal order (cx + cy) so raised scenery overlaps cleanly.
+	# Add rasterized chunk sprites in isometric diagonal order (cx + cy) so raised hills overlap cleanly.
 	for diag in range(CHUNK_COLS + CHUNK_ROWS - 1):
 		for cx in range(CHUNK_COLS):
 			var cy := diag - cx
@@ -1127,27 +1132,27 @@ func _build_map_layers() -> void:
 			var right_pt: Vector2 = world.tile_center(x1 - 1, y0)
 			var bottom_pt: Vector2 = world.tile_center(x1 - 1, y1 - 1)
 			var left_pt: Vector2 = world.tile_center(x0, y1 - 1)
-			var min_x := left_pt.x - WORLD_MAP_SCRIPT.TILE_W
-			var max_x := right_pt.x + WORLD_MAP_SCRIPT.TILE_W
-			var min_y := top_pt.y - WORLD_MAP_SCRIPT.TILE_H - 96.0
-			var max_y := bottom_pt.y + WORLD_MAP_SCRIPT.TILE_H
-			chunk_bounds[idx] = Rect2(Vector2(min_x, min_y), Vector2(max_x - min_x, max_y - min_y))
+			var min_x := floorf(left_pt.x - WORLD_MAP_SCRIPT.TILE_W)
+			var max_x := ceilf(right_pt.x + WORLD_MAP_SCRIPT.TILE_W)
+			var min_y := floorf(top_pt.y - WORLD_MAP_SCRIPT.TILE_H - 96.0)
+			var max_y := ceilf(bottom_pt.y + WORLD_MAP_SCRIPT.TILE_H)
+			var bounds := Rect2(Vector2(min_x, min_y), Vector2(max_x - min_x, max_y - min_y))
+			chunk_bounds[idx] = bounds
 
-			var ground_node := LayerNode.new()
-			ground_node.name = "Ground_%d_%d" % [cx, cy]
-			ground_node.visible = false
-			ground_node.draw_cb = func(canvas: CanvasItem) -> void:
-				map_renderer.draw_ground_chunk(canvas, x0, y0, x1, y1, turn % 2 == 1, depleted_tiles, wildfire_tiles)
-			ground_root.add_child(ground_node)
-			ground_chunks[idx] = ground_node
+			var sprite := Sprite2D.new()
+			sprite.name = "Chunk_%d_%d" % [cx, cy]
+			sprite.centered = false
+			sprite.position = bounds.position
+			sprite.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+			sprite.visible = false
+			chunk_root.add_child(sprite)
 
-			var scenery_node := LayerNode.new()
-			scenery_node.name = "Scenery_%d_%d" % [cx, cy]
-			scenery_node.visible = false
-			scenery_node.draw_cb = func(canvas: CanvasItem) -> void:
-				map_renderer.draw_scenery_chunk(canvas, x0, y0, x1, y1, discovered_landmarks, turn % 2 == 1, depleted_tiles, wildfire_tiles)
-			scenery_root.add_child(scenery_node)
-			scenery_chunks[idx] = scenery_node
+			map_chunks[idx] = {
+				"x0": x0, "y0": y0, "x1": x1, "y1": y1,
+				"bounds": bounds, "sprite": sprite,
+				"viewport": null, "canvas": null,
+				"baked": false, "dirty": true
+			}
 
 	dynamic_world_layer = LayerNode.new()
 	dynamic_world_layer.name = "DynamicWorld"
@@ -1160,6 +1165,44 @@ func _build_map_layers() -> void:
 	add_child(overlay_layer)
 
 
+func _ensure_chunk_baked(idx: int) -> void:
+	var chunk: Dictionary = map_chunks[idx]
+	if chunk["baked"]:
+		if chunk["dirty"]:
+			chunk["dirty"] = false
+			var canvas: LayerNode = chunk["canvas"]
+			var vp: SubViewport = chunk["viewport"]
+			canvas.queue_redraw()
+			vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+		return
+	var bounds: Rect2 = chunk["bounds"]
+	var vp := SubViewport.new()
+	vp.name = "ChunkVP_%d" % idx
+	vp.size = Vector2i(int(ceilf(bounds.size.x)), int(ceilf(bounds.size.y)))
+	vp.transparent_bg = true
+	vp.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
+	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	vp.disable_3d = true
+	add_child(vp)
+
+	var x0: int = chunk["x0"]
+	var y0: int = chunk["y0"]
+	var x1: int = chunk["x1"]
+	var y1: int = chunk["y1"]
+	var canvas := LayerNode.new()
+	canvas.position = -bounds.position
+	canvas.draw_cb = func(c: CanvasItem) -> void:
+		map_renderer.draw_baked_chunk(c, x0, y0, x1, y1, discovered_landmarks, turn % 2 == 1, depleted_tiles, wildfire_tiles)
+	vp.add_child(canvas)
+
+	var sprite: Sprite2D = chunk["sprite"]
+	sprite.texture = vp.get_texture()
+	chunk["viewport"] = vp
+	chunk["canvas"] = canvas
+	chunk["baked"] = true
+	chunk["dirty"] = false
+
+
 func _chunk_index_for_tile(tile: Vector2i) -> int:
 	var cx := clampi(floori(float(tile.x) / CHUNK_W), 0, CHUNK_COLS - 1)
 	var cy := clampi(floori(float(tile.y) / CHUNK_H), 0, CHUNK_ROWS - 1)
@@ -1167,21 +1210,23 @@ func _chunk_index_for_tile(tile: Vector2i) -> int:
 
 
 func _mark_chunk_dirty(tile: Vector2i) -> void:
-	if ground_chunks.is_empty():
+	if map_chunks.is_empty():
 		return
 	var idx := _chunk_index_for_tile(tile)
-	if ground_chunks[idx].visible:
-		ground_chunks[idx].queue_redraw()
-	if scenery_chunks[idx].visible:
-		scenery_chunks[idx].queue_redraw()
+	var chunk: Dictionary = map_chunks[idx]
+	chunk["dirty"] = true
+	var sprite: Sprite2D = chunk["sprite"]
+	if sprite.visible and chunk["baked"]:
+		_ensure_chunk_baked(idx)
 
 
 func _mark_all_chunks_dirty() -> void:
-	for idx in range(ground_chunks.size()):
-		if ground_chunks[idx].visible:
-			ground_chunks[idx].queue_redraw()
-		if scenery_chunks[idx].visible:
-			scenery_chunks[idx].queue_redraw()
+	for idx in range(map_chunks.size()):
+		var chunk: Dictionary = map_chunks[idx]
+		chunk["dirty"] = true
+		var sprite: Sprite2D = chunk["sprite"]
+		if sprite.visible and chunk["baked"]:
+			_ensure_chunk_baked(idx)
 
 
 func _sync_map_transform() -> void:
@@ -1193,11 +1238,12 @@ func _sync_map_transform() -> void:
 	var world_br := _screen_to_world(MAP_VIEW.end)
 	var view_world := Rect2(world_tl, world_br - world_tl).grow(80.0)
 	for idx in range(chunk_bounds.size()):
-		if not ground_chunks[idx].visible and chunk_bounds[idx].intersects(view_world):
-			ground_chunks[idx].visible = true
-			scenery_chunks[idx].visible = true
-			ground_chunks[idx].queue_redraw()
-			scenery_chunks[idx].queue_redraw()
+		var in_view := chunk_bounds[idx].intersects(view_world)
+		var chunk: Dictionary = map_chunks[idx]
+		var sprite: Sprite2D = chunk["sprite"]
+		sprite.visible = in_view
+		if in_view:
+			_ensure_chunk_baked(idx)
 
 
 func _redraw_dynamic() -> void:
