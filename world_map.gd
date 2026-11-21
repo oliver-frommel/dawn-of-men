@@ -170,7 +170,14 @@ func nearest_land_tile(tile: Vector2i) -> Vector2i:
 
 
 func has_land_route_point(tile: Vector2i) -> bool:
-	return land_routes.has_point(tile_id(tile))
+	var id := tile_id(tile)
+	return land_routes.has_point(id) and not land_routes.is_point_disabled(id)
+
+
+func set_tile_blocked(tile: Vector2i, blocked: bool) -> void:
+	var id := tile_id(tile)
+	if land_routes.has_point(id):
+		land_routes.set_point_disabled(id, blocked)
 
 
 func find_route(origin: Vector2, tile: Vector2i, direct := false) -> Dictionary:

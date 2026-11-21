@@ -26,7 +26,8 @@ func draw_map(
 	discovered_landmarks: Dictionary,
 	is_dry_season := false,
 	depleted_tiles: Dictionary = {},
-	carcass_sites: Dictionary = {}
+	carcass_sites: Dictionary = {},
+	wildfire_tiles: Dictionary = {}
 ) -> void:
 	var visible: Array[Vector2i] = []
 	var extent := Vector2(WorldMapScript.TILE_W * 0.5, WorldMapScript.TILE_H * 0.5 + 72.0) * zoom_level
@@ -47,14 +48,19 @@ func draw_map(
 			var id := world.tile_id(tile)
 			if explored_tiles.has(id):
 				visible.append(tile)
-				_draw_terrain_ground(canvas, center, tile, world.terrain_at(tile), is_dry_season, depleted_tiles.has(id))
+				var fire_state := str(wildfire_tiles.get(id, {}).get("state", ""))
+				_draw_terrain_ground(canvas, center, tile, world.terrain_at(tile), is_dry_season, depleted_tiles.has(id), fire_state)
 			else:
 				_draw_unexplored_tile(canvas, center, tile.x, tile.y)
 	for tile in visible:
 		var center := world.tile_center(tile.x, tile.y)
 		var id := world.tile_id(tile)
 		_draw_exploration_frontier(canvas, center, tile, explored_tiles)
-		_draw_terrain_details(canvas, center, world.terrain_at(tile), tile.x, tile.y)
+		var fire_info: Dictionary = wildfire_tiles.get(id, {})
+		if fire_info.is_empty():
+			_draw_terrain_details(canvas, center, world.terrain_at(tile), tile.x, tile.y)
+		else:
+			_draw_wildfire_details(canvas, center, fire_info, tile.x, tile.y)
 		if depleted_tiles.has(id):
 			_draw_depleted_mark(canvas, center)
 		if carcass_sites.has(id):
@@ -169,7 +175,7 @@ func _draw_unexplored_tile(canvas: CanvasItem, center: Vector2, x: int, y: int) 
 	canvas.draw_polyline(outline, Color("#38443f", 0.12), 0.7, true)
 
 
-func _draw_terrain_ground(canvas: CanvasItem, center: Vector2, tile: Vector2i, terrain: String, is_dry_season := false, is_depleted := false) -> void:
+func _draw_terrain_ground(canvas: CanvasItem, center: Vector2, tile: Vector2i, terrain: String, is_dry_season := false, is_depleted := false, fire_state := "") -> void:
 	var color := Color("#a39b59")
 	match terrain:
 		"woodland": color = Color("#687d49")
@@ -180,6 +186,12 @@ func _draw_terrain_ground(canvas: CanvasItem, center: Vector2, tile: Vector2i, t
 		"river", "lake": color = Color("#93875a")
 	if is_dry_season and terrain in ["savanna", "woodland", "wetland", "dryland"]:
 		color = color.lerp(Color("#b69a62"), 0.20)
+	if fire_state == "burning":
+		color = Color("#3a271f")
+	elif fire_state == "cooled":
+		color = Color("#4a423a")
+	elif fire_state == "regrowth":
+		color = Color("#597b45")
 	if is_depleted:
 		color = color.darkened(0.14)
 	var corners := PackedVector2Array()
@@ -295,6 +307,35 @@ func _draw_carcass_icon(canvas: CanvasItem, center: Vector2) -> void:
 	canvas.draw_line(badge + Vector2(-4, 2), badge + Vector2(4, -2), bone, 1.8, true)
 	canvas.draw_circle(badge + Vector2(-4, -2), 1.4, bone)
 	canvas.draw_circle(badge + Vector2(4, 2), 1.4, bone)
+
+
+func _draw_wildfire_details(canvas: CanvasItem, center: Vector2, fire_info: Dictionary, x: int, y: int) -> void:
+	var state: String = fire_info.get("state", "")
+	if state == "burning":
+		for i in range(4):
+			var pt := _vegetation_point(center, x, y, i, 4)
+			canvas.draw_circle(pt + Vector2(0, -3), 8.0, Color(0.95, 0.42, 0.14, 0.34))
+			canvas.draw_colored_polygon(PackedVector2Array([
+				pt + Vector2(-6, 3), pt + Vector2(-3, -8), pt + Vector2(0, -3),
+				pt + Vector2(3, -11), pt + Vector2(6, 3)
+			]), Color("#ef8a35"))
+			canvas.draw_colored_polygon(PackedVector2Array([
+				pt + Vector2(-3, 3), pt + Vector2(0, -5), pt + Vector2(3, 3)
+			]), Color("#ffe08e"))
+	elif state == "cooled":
+		for i in range(5):
+			var pt := _vegetation_point(center, x, y, i, 5)
+			canvas.draw_circle(pt, 2.2, Color("#2c2825", 0.8))
+			if i % 2 == 0 and not fire_info.get("ember_taken", false):
+				canvas.draw_circle(pt + Vector2(1, -1), 1.4, Color("#e47a38", 0.85))
+		if not fire_info.get("foraged", false):
+			var badge := center + Vector2(-18, 6)
+			canvas.draw_circle(badge, 6.5, Color("#2d2621", 0.9))
+			canvas.draw_circle(badge, 3.0, Color("#e8b86b"))
+	elif state == "regrowth":
+		for i in range(6):
+			var pt := _vegetation_point(center, x, y, i, 6)
+			_draw_tall_grass(canvas, pt, 0.78, Color("#88bd65"))
 
 
 func _draw_landmark_icon(canvas: CanvasItem, center: Vector2, kind: String, is_dry_season := false) -> void:

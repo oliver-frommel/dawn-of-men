@@ -87,6 +87,8 @@ var learned_skills: Dictionary = {}
 var discovered_landmark_names: Dictionary = {}
 var depleted_tiles: Dictionary = {}
 var carcass_sites: Dictionary = {}
+var wildfire_tiles: Dictionary = {}
+var carried_ember_seasons := 0
 var wildlife_sighted: Dictionary = {}
 var hunts_completed := 0
 var scavenges_completed := 0
@@ -630,6 +632,18 @@ func _pick_wildlife_goal(animal: Dictionary) -> bool:
 	var home_tile: Vector2i = animal["home_tile"]
 	var current_tile: Vector2i = world.tile_from_world(animal["position"])
 	var radius: int = int(animal["roam_radius"])
+	if animal.get("is_prey", false) and not wildfire_tiles.is_empty():
+		var regrowth_targets: Array[Vector2i] = []
+		for id in wildfire_tiles:
+			if wildfire_tiles[id].get("state", "") != "regrowth":
+				continue
+			var tile := Vector2i(int(id) % WORLD_MAP_SCRIPT.WORLD_WIDTH, floori(float(id) / WORLD_MAP_SCRIPT.WORLD_WIDTH))
+			if tile != current_tile and tile.distance_squared_to(home_tile) <= (radius + 3) * (radius + 3) and world.has_land_route_point(tile):
+				regrowth_targets.append(tile)
+		if not regrowth_targets.is_empty() and ai_rng.randf() < 0.7:
+			var target_tile: Vector2i = regrowth_targets[ai_rng.randi_range(0, regrowth_targets.size() - 1)]
+			if _route_actor_to(animal, target_tile):
+				return true
 	var preferred: Array[Vector2i] = []
 	var fallback: Array[Vector2i] = []
 	for tile in world.tiles_in_radius(home_tile, radius):
@@ -821,7 +835,7 @@ func _wildlife_caption() -> String:
 func _draw() -> void:
 	map_renderer.draw_world(self, W, H)
 	draw_set_transform(_map_draw_origin(), 0.0, Vector2.ONE * zoom_level)
-	map_renderer.draw_map(self, MAP_VIEW, zoom_level, _screen_to_world, explored_tiles, discovered_landmarks, turn % 2 == 1, depleted_tiles, carcass_sites)
+	map_renderer.draw_map(self, MAP_VIEW, zoom_level, _screen_to_world, explored_tiles, discovered_landmarks, turn % 2 == 1, depleted_tiles, carcass_sites, wildfire_tiles)
 	map_renderer.draw_actor_shadows(self, MAP_VIEW, _world_to_screen, player_actor, ai_bands, wildlife)
 	draw_set_transform(Vector2.ZERO)
 	if is_instance_valid(hominin_viewport):
@@ -1093,6 +1107,72 @@ func _tick_depleted_tiles(entering_wet: bool) -> void:
 		depleted_tiles.erase(id)
 
 
+func _tick_wildfires(entering_dry: bool) -> void:
+	var to_remove: Array = []
+	for id in wildfire_tiles:
+		var info: Dictionary = wildfire_tiles[id]
+		var tile := Vector2i(int(id) % WORLD_MAP_SCRIPT.WORLD_WIDTH, floori(float(id) / WORLD_MAP_SCRIPT.WORLD_WIDTH))
+		var state: String = info["state"]
+		if entering_dry:
+			world.set_tile_blocked(tile, false)
+			to_remove.append(id)
+		else:
+			if state == "burning":
+				world.set_tile_blocked(tile, false)
+			if state in ["burning", "cooled"]:
+				info["state"] = "regrowth"
+				info["foraged"] = false
+	for id in to_remove:
+		wildfire_tiles.erase(id)
+	if not entering_dry:
+		return
+	var player_tile: Vector2i = world.tile_from_world(player_actor["position"])
+	var candidates: Array[Vector2i] = []
+	for id in explored_tiles:
+		var tile := Vector2i(int(id) % WORLD_MAP_SCRIPT.WORLD_WIDTH, floori(float(id) / WORLD_MAP_SCRIPT.WORLD_WIDTH))
+		if tile == player_tile or tile.distance_squared_to(player_tile) < 4:
+			continue
+		if tile in WORLD_MAP_SCRIPT.SPRING_TILES or not world.landmark_for_tile(tile).is_empty():
+			continue
+		if world.terrain_at(tile) in ["savanna", "dryland"] and world.has_land_route_point(tile):
+			candidates.append(tile)
+	if candidates.is_empty():
+		return
+	var origin: Vector2i = candidates[ai_rng.randi_range(0, candidates.size() - 1)]
+	for _try in range(mini(8, candidates.size())):
+		var candidate: Vector2i = candidates[ai_rng.randi_range(0, candidates.size() - 1)]
+		var has_flammable_neighbor := false
+		for edge in WORLD_MAP_SCRIPT.TILE_EDGES:
+			var n: Vector2i = candidate + edge
+			if n != player_tile and n not in WORLD_MAP_SCRIPT.SPRING_TILES and world.landmark_for_tile(n).is_empty() and world.terrain_at(n) in ["savanna", "dryland", "woodland"] and world.has_land_route_point(n):
+				has_flammable_neighbor = true
+				break
+		if has_flammable_neighbor:
+			origin = candidate
+			break
+	var origin_id: int = world.tile_id(origin)
+	wildfire_tiles[origin_id] = {"state": "burning", "foraged": false, "ember_taken": false}
+	world.set_tile_blocked(origin, true)
+	var cooled_added := 0
+	for edge in WORLD_MAP_SCRIPT.TILE_EDGES:
+		if cooled_added >= 2:
+			break
+		var neighbor: Vector2i = origin + edge
+		if neighbor == player_tile or neighbor in WORLD_MAP_SCRIPT.SPRING_TILES or not world.landmark_for_tile(neighbor).is_empty():
+			continue
+		if world.terrain_at(neighbor) in ["savanna", "dryland", "woodland"] and world.has_land_route_point(neighbor):
+			wildfire_tiles[world.tile_id(neighbor)] = {"state": "cooled", "foraged": false, "ember_taken": false}
+			cooled_added += 1
+	_event("WILDFIRE  /  Dry-season flames ignite nearby %s. Avoid active fire; cooled burn scars expose rich roots and seeds." % world.terrain_at(origin))
+
+
+func _can_recover_ember(tile: Vector2i) -> bool:
+	if not _has_skill("hearth_keeping"):
+		return false
+	var info: Dictionary = wildfire_tiles.get(world.tile_id(tile), {})
+	return info.get("state", "") == "cooled" and not info.get("ember_taken", false)
+
+
 func _run_ended() -> bool:
 	return lineage_ended or turn >= CHRONICLE_TURNS
 
@@ -1111,8 +1191,11 @@ func _on_advance() -> void:
 	turn = next_turn
 	season_action_used = false
 	moves_remaining = _max_travel_range()
+	if carried_ember_seasons > 0:
+		carried_ember_seasons -= 1
 	_tick_depleted_tiles(not entering_dry)
 	_tick_carcass_sites()
+	_tick_wildfires(entering_dry)
 	year_bp = max(0, year_bp - 100)
 	food = maxi(0, food - food_cost)
 	var low_food_penalty := LOW_FOOD_COHESION_PENALTY
@@ -1122,6 +1205,8 @@ func _on_advance() -> void:
 	cohesion = clampi(cohesion + cohesion_delta, 0, 100)
 	if entering_dry and inland and _has_skill("hide_working"):
 		cohesion = clampi(cohesion + 2, 0, 100)
+	if carried_ember_seasons > 0:
+		cohesion = clampi(cohesion + 1, 0, 100)
 	if food > 0:
 		starvation_warned = false
 	if cohesion == 0:
@@ -1209,12 +1294,20 @@ func _forage_food_gain(tile: Vector2i) -> int:
 		yield_on_terrain = maxi(yield_on_terrain, WET_WATERHOLE_FORAGE)
 	elif is_dry:
 		yield_on_terrain = DRY_SPRING_FORAGE if tile in WORLD_MAP_SCRIPT.SPRING_TILES else DRY_FORAGE_YIELDS.get(terrain, 0)
+	var fire_info: Dictionary = wildfire_tiles.get(world.tile_id(tile), {})
+	var fire_state: String = fire_info.get("state", "")
+	if fire_state == "burning":
+		return 0
 	if yield_on_terrain > 0:
 		if not is_dry and _has_skill("plant_lore") and terrain in ["woodland", "wetland"]:
 			yield_on_terrain += 4
 		if is_dry and _has_skill("food_drying") and not world.near_permanent_water(tile):
 			yield_on_terrain += 3
 		if _has_skill("stone_flaking") and terrain in ["savanna", "dryland", "volcanic"]:
+			yield_on_terrain += 4
+		if fire_state == "cooled" and not fire_info.get("foraged", false):
+			yield_on_terrain += 10
+		elif fire_state == "regrowth":
 			yield_on_terrain += 4
 	return mini(yield_on_terrain, 100 - food)
 
@@ -1283,14 +1376,24 @@ func _on_gather() -> void:
 		return
 	var cohesion_gain := mini(2, 100 - cohesion)
 	season_action_used = true
+	var fire_info: Dictionary = wildfire_tiles.get(tile_id, {})
+	var fire_state: String = fire_info.get("state", "")
+	var burn_forage: bool = fire_state == "cooled" and not bool(fire_info.get("foraged", false))
+	if burn_forage:
+		fire_info["foraged"] = true
 	depleted_tiles[tile_id] = 1 if tile in WORLD_MAP_SCRIPT.SPRING_TILES else 2
 	_start_player_activity("gathering", 3.0)
 	food += food_gain
 	cohesion += cohesion_gain
 	if food > 0:
 		starvation_warned = false
-	var site := "at the spring" if tile in WORLD_MAP_SCRIPT.SPRING_TILES else ("at the waterhole" if tile == WORLD_MAP_SCRIPT.SEASONAL_WATERHOLE_TILE else "in %s" % world.terrain_at(tile))
-	_event("You forage %s. Food +%d, cohesion +%d." % [site, food_gain, cohesion_gain])
+	if burn_forage:
+		_event("BURN SCAR FORAGE  /  You gather exposed roots, seeds, and insects from cooled ash. Food +%d, cohesion +%d." % [food_gain, cohesion_gain])
+	elif fire_state == "regrowth":
+		_event("REGROWTH FORAGE  /  Fresh green shoots rise from the ash. Food +%d, cohesion +%d." % [food_gain, cohesion_gain])
+	else:
+		var site := "at the spring" if tile in WORLD_MAP_SCRIPT.SPRING_TILES else ("at the waterhole" if tile == WORLD_MAP_SCRIPT.SEASONAL_WATERHOLE_TILE else "in %s" % world.terrain_at(tile))
+		_event("You forage %s. Food +%d, cohesion +%d." % [site, food_gain, cohesion_gain])
 	_refresh_ui()
 	queue_redraw()
 
@@ -1314,6 +1417,24 @@ func _on_explore() -> void:
 
 func _on_learn() -> void:
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
+	if _can_recover_ember(tile):
+		if not _season_action_blocker().is_empty():
+			return
+		season_action_used = true
+		var tile_id: int = world.tile_id(tile)
+		wildfire_tiles[tile_id]["ember_taken"] = true
+		var knowledge_gain := mini(12, 99 - knowledge)
+		var cohesion_gain := mini(4 if _has_skill("ember_carrying") else 2, 100 - cohesion)
+		knowledge += knowledge_gain
+		cohesion += cohesion_gain
+		if _has_skill("ember_carrying"):
+			carried_ember_seasons = 4
+		_start_player_activity("learning_at_hearth", 3.0)
+		var carry_note := " You pack live coals to carry away from the burn." if _has_skill("ember_carrying") else " You tend a glowing coal from the ash."
+		_event("EMBER RECOVERED  /%s Knowledge +%d, cohesion +%d." % [carry_note, knowledge_gain, cohesion_gain])
+		_refresh_ui()
+		queue_redraw()
+		return
 	var cost := _practice_food_cost(tile)
 	if not _season_action_blocker().is_empty() or food < cost or knowledge >= 99:
 		return
@@ -1534,17 +1655,23 @@ func _refresh_action_label() -> void:
 	if blocker.is_empty():
 		scout_button.tooltip_text = "Chart %d new tiles (radius %d) and gain up to 9 knowledge." % [new_tiles, _scout_radius()] if new_tiles > 0 else "Move closer to unmapped terrain to scout."
 
-	var practice_cost := _practice_food_cost(tile)
-	learn_button.text = "Practice −%d" % practice_cost
-	learn_button.disabled = not blocker.is_empty() or food < practice_cost or knowledge >= 99
-	learn_button.tooltip_text = blocker
-	if blocker.is_empty():
-		if knowledge >= 99:
-			learn_button.tooltip_text = "Knowledge is at its maximum."
-		elif food < practice_cost:
-			learn_button.tooltip_text = "Practicing requires %d food here." % practice_cost
-		else:
-			learn_button.tooltip_text = "Spend %d food to gain up to 15 knowledge for Skills." % practice_cost
+	var can_ember := _can_recover_ember(tile)
+	if can_ember:
+		learn_button.text = "Take ember"
+		learn_button.disabled = not blocker.is_empty()
+		learn_button.tooltip_text = blocker if not blocker.is_empty() else "Recover a live ember from this cooled burn scar (+12 knowledge, no food cost)."
+	else:
+		var practice_cost := _practice_food_cost(tile)
+		learn_button.text = "Practice −%d" % practice_cost
+		learn_button.disabled = not blocker.is_empty() or food < practice_cost or knowledge >= 99
+		learn_button.tooltip_text = blocker
+		if blocker.is_empty():
+			if knowledge >= 99:
+				learn_button.tooltip_text = "Knowledge is at its maximum."
+			elif food < practice_cost:
+				learn_button.tooltip_text = "Practicing requires %d food here." % practice_cost
+			else:
+				learn_button.tooltip_text = "Spend %d food to gain up to 15 knowledge for Skills." % practice_cost
 
 	var ready_skills := 0
 	for skill in TECH_TREE_SCRIPT.SKILLS:
@@ -1645,7 +1772,8 @@ func _set_player_destination(tile: Vector2i, announce := true, direct := false) 
 		return
 	if not _route_actor_to(player_actor, tile, direct, moves_remaining):
 		if announce:
-			var message := "Pick a destination on land." if not world.has_land_route_point(tile) else "No land route leads there."
+			var tile_id: int = world.tile_id(tile)
+			var message := "Active wildfire — wait until flames cool." if wildfire_tiles.get(tile_id, {}).get("state", "") == "burning" else ("Pick a destination on land." if not world.has_land_route_point(tile) else "No land route leads there.")
 			_show_toast(message)
 		return
 	player_actor["activity"] = "walking"
