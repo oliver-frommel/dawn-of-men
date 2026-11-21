@@ -22,6 +22,10 @@ const MATING_FOOD_COST := 8
 const MATE_RANGE := 76.0
 const SUCCESSION_SEASONS := 2
 const SUCCESSION_COHESION := 8
+const AGING_RANGE_PENALTY_AGE := 8
+const AGING_COHESION_AGE := 10
+const SHARE_CAMP_FOOD_COST := 4
+const SHARE_CAMP_COOLDOWN := 4
 const BASE_SCOUT_RADIUS := 4
 const TRAIL_READING_SCOUT_RADIUS := 5
 const BASE_TRAVEL_RANGE := 7
@@ -72,6 +76,8 @@ var map_renderer: MAP_RENDERER_SCRIPT
 
 var turn := 0
 var generation := 1
+var adult_age := 0
+var aging_warned := false
 var succession_turn := -1
 var season_action_used := false
 var kinship_recorded := false
@@ -90,8 +96,10 @@ var carcass_sites: Dictionary = {}
 var wildfire_tiles: Dictionary = {}
 var carried_ember_seasons := 0
 var wildlife_sighted: Dictionary = {}
+var band_share_ready_turn: Dictionary = {}
 var hunts_completed := 0
 var scavenges_completed := 0
+var band_shares_completed := 0
 var event_log: Array[String] = ["The Rift Valley opens before your ancestors. Travel permanently charts the land.", "Afarensis bands learn the old paths."]
 var map_names := ["Laetoli", "Olduvai", "Turkana", "Afar", "Awash", "Omo", "Tugen Hills", "Lomekwi"]
 var toast := ""
@@ -116,6 +124,10 @@ var toast_label: Label
 var skills_overlay: Control
 var skills_header_label: Label
 var skill_cards: Dictionary = {}
+var summary_overlay: Control
+var summary_title_label: Label
+var summary_epithet_label: Label
+var summary_body_label: Label
 var player_actor: Dictionary = {}
 var ai_bands: Array[Dictionary] = []
 var camera_offset := Vector2.ZERO
@@ -185,7 +197,7 @@ func _process(delta: float) -> void:
 				bands_need_redraw = true
 	_check_band_encounters()
 	if moved or bands_moved:
-		_refresh_mate_button(_season_action_blocker())
+		_refresh_action_label()
 	_sync_hominin_models(delta)
 	var wildlife_changed := _update_wildlife(delta)
 	_check_predator_encounters()
@@ -755,6 +767,7 @@ func _check_predator_encounters() -> void:
 				lineage_ended = true
 				player_actor["route"] = []
 				_event("LINEAGE LOST  /  Shaken and scattered by predators, your band cannot hold together.")
+				_show_summary_overlay()
 		_refresh_ui()
 		queue_redraw()
 		return
@@ -949,7 +962,98 @@ func _build_ui() -> void:
 	toast_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	toast_label.hide()
 	_build_skills_overlay(root)
+	_build_summary_overlay(root)
 	_refresh_ui()
+
+
+func _build_summary_overlay(root: Control) -> void:
+	summary_overlay = Control.new()
+	summary_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	summary_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	summary_overlay.hide()
+	root.add_child(summary_overlay)
+
+	var backdrop := ColorRect.new()
+	backdrop.position = MAP_VIEW.position
+	backdrop.size = MAP_VIEW.size
+	backdrop.color = Color(0.04, 0.08, 0.08, 0.76)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_STOP
+	summary_overlay.add_child(backdrop)
+
+	var box := Rect2(225, 146, 740, 588)
+	_panel(summary_overlay, box, Color("#15221f"), Color("#b99561"))
+	summary_title_label = _label(summary_overlay, "", Rect2(box.position.x + 28, box.position.y + 24, 684, 34), 16, Color("#e3c58d"), true)
+	summary_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	summary_epithet_label = _label(summary_overlay, "", Rect2(box.position.x + 28, box.position.y + 62, 684, 28), 11, Color("#9fd4a7"), true)
+	summary_epithet_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_panel(summary_overlay, Rect2(box.position.x + 40, box.position.y + 100, 660, 2), Color("#b99561", 0.5))
+	summary_body_label = _label(summary_overlay, "", Rect2(box.position.x + 44, box.position.y + 118, 652, 390), 10, Color("#e8dfce"), false)
+	_button(summary_overlay, "Inspect Valley", Rect2(box.position.x + 150, box.end.y - 64, 190, 42), Color("#465662"), _on_close_summary)
+	_button(summary_overlay, "Begin New Chronicle  ›", Rect2(box.position.x + 360, box.end.y - 64, 230, 42), Color("#b88d56"), _on_restart_chronicle)
+
+
+func _on_close_summary() -> void:
+	if is_instance_valid(summary_overlay):
+		summary_overlay.hide()
+
+
+func _on_restart_chronicle() -> void:
+	get_tree().reload_current_scene()
+
+
+func _lineage_epithet() -> String:
+	if _has_skill("ember_carrying") or _has_skill("hearth_keeping"):
+		return "Keepers of the Hearth"
+	var charted_pct := float(explored_tiles.size()) / float(WORLD_MAP_SCRIPT.WORLD_WIDTH * WORLD_MAP_SCRIPT.WORLD_HEIGHT)
+	if charted_pct >= 0.35 or discovered_landmark_names.size() >= 6:
+		return "Rift Pathfinders"
+	if hunts_completed >= 3 or (_has_skill("stone_flaking") and _has_skill("hide_working")):
+		return "Stone-Age Hunters"
+	if _has_skill("carry_water") or generation >= 3:
+		return "Children of the Springs"
+	return "Wanderers of the Rift"
+
+
+func _show_summary_overlay() -> void:
+	if not is_instance_valid(summary_overlay):
+		return
+	if is_instance_valid(skills_overlay):
+		skills_overlay.hide()
+	var total_tiles := WORLD_MAP_SCRIPT.WORLD_WIDTH * WORLD_MAP_SCRIPT.WORLD_HEIGHT
+	var charted_pct := 100.0 * float(explored_tiles.size()) / float(total_tiles)
+	var skill_names: Array[String] = []
+	for skill in TECH_TREE_SCRIPT.SKILLS:
+		if _has_skill(str(skill["id"])):
+			skill_names.append(str(skill["name"]))
+	var skills_text := ", ".join(skill_names) if not skill_names.is_empty() else "None"
+	if lineage_ended:
+		summary_title_label.text = "THE LINEAGE SCATTERS"
+		summary_title_label.add_theme_color_override("font_color", Color("#e09b84"))
+		summary_epithet_label.text = "%s  ·  Ended at %s (Turn %d / %d)" % [_lineage_epithet(), _format_year(year_bp), turn, CHRONICLE_TURNS]
+	else:
+		summary_title_label.text = "THE CHRONICLE REACHES THE PRESENT"
+		summary_title_label.add_theme_color_override("font_color", Color("#e3c58d"))
+		summary_epithet_label.text = "Legacy Title: %s" % _lineage_epithet()
+	summary_body_label.text = (
+		"Rift Valley charted:  %d / %d tiles (%.1f%%)\n"
+		+ "Landmarks discovered:  %d / %d\n"
+		+ "Generations lived:  %d\n"
+		+ "Final stores:  Food %d  ·  Knowledge %d  ·  Cohesion %d\n\n"
+		+ "Wildlife species sighted:  %d\n"
+		+ "Hunts completed:  %d   ·   Scavenges:  %d   ·   Shared camps:  %d\n"
+		+ "Neanderthal kinship:  %s\n\n"
+		+ "Skills mastered (%d / %d):\n%s"
+	) % [
+		explored_tiles.size(), total_tiles, charted_pct,
+		discovered_landmark_names.size(), WORLD_MAP_SCRIPT.LANDMARKS.size(),
+		generation,
+		food, knowledge, cohesion,
+		wildlife_sighted.size(),
+		hunts_completed, scavenges_completed, band_shares_completed,
+		"Recorded" if kinship_recorded else "Unrecorded",
+		learned_skills.size(), TECH_TREE_SCRIPT.SKILLS.size(), skills_text
+	]
+	summary_overlay.show()
 
 
 func _build_skills_overlay(root: Control) -> void:
@@ -1075,6 +1179,8 @@ func _max_travel_range() -> int:
 		limit += TRAIL_READING_TRAVEL_BONUS
 	if turn >= 13:
 		limit += ERECTUS_TRAVEL_BONUS
+	if adult_age >= AGING_RANGE_PENALTY_AGE:
+		limit = maxi(4, limit - 1)
 	return limit
 
 
@@ -1190,7 +1296,7 @@ func _on_advance() -> void:
 	var food_cost := _season_food_cost(tile, next_turn)
 	turn = next_turn
 	season_action_used = false
-	moves_remaining = _max_travel_range()
+	adult_age += 1
 	if carried_ember_seasons > 0:
 		carried_ember_seasons -= 1
 	_tick_depleted_tiles(not entering_dry)
@@ -1207,6 +1313,13 @@ func _on_advance() -> void:
 		cohesion = clampi(cohesion + 2, 0, 100)
 	if carried_ember_seasons > 0:
 		cohesion = clampi(cohesion + 1, 0, 100)
+	_complete_succession()
+	if adult_age >= AGING_COHESION_AGE and succession_turn < 0 and turn < CHRONICLE_TURNS:
+		cohesion = maxi(0, cohesion - 2)
+		if not aging_warned:
+			aging_warned = true
+			_event("AGING GENERATION  /  Without an heir stepping forward, your aging adult strains to hold the band together (−2 cohesion/season). Pair with a neighboring band.")
+	moves_remaining = _max_travel_range()
 	if food > 0:
 		starvation_warned = false
 	if cohesion == 0:
@@ -1215,6 +1328,7 @@ func _on_advance() -> void:
 		player_actor["route"] = []
 		_event("LINEAGE LOST  /  Without enough food and cohesion, your band scatters across the Rift Valley.")
 		_refresh_ui()
+		_show_summary_overlay()
 		queue_redraw()
 		_sync_wildlife()
 		return
@@ -1254,10 +1368,11 @@ func _on_advance() -> void:
 		_event("Homo sapiens appears in Africa. Distinct human lineages now share a wider world.")
 	if turn == 30:
 		_event("Across Eurasia, human groups meet repeatedly. Shared ancestry carries between branches.")
-	_complete_succession()
 	if turn == CHRONICLE_TURNS:
 		_event("The chronicle reaches the present. Many branches end; traces of kinship remain.")
 	_refresh_ui()
+	if turn == CHRONICLE_TURNS:
+		_show_summary_overlay()
 	queue_redraw()
 	_sync_wildlife()
 
@@ -1479,8 +1594,61 @@ func _on_learn_skill(skill_id: String) -> void:
 	queue_redraw()
 
 
+func _nearby_shareable_band() -> int:
+	var position: Vector2 = player_actor["position"]
+	for i in range(ai_bands.size()):
+		if _is_paranthropus_band(i):
+			continue
+		var band_position: Vector2 = ai_bands[i]["position"]
+		if position.distance_squared_to(band_position) <= MATE_RANGE * MATE_RANGE and _world_tile_visible(band_position):
+			if world.land_segment_clear(position, band_position):
+				return i
+	return -1
+
+
+func _nearest_undiscovered_landmark_hint() -> String:
+	var player_tile: Vector2i = world.tile_from_world(player_actor["position"])
+	var best: Dictionary = {}
+	var best_dist := INF
+	for landmark in WORLD_MAP_SCRIPT.LANDMARKS:
+		if discovered_landmark_names.has(str(landmark["name"])):
+			continue
+		var d := player_tile.distance_squared_to(landmark["tile"])
+		if d < best_dist:
+			best_dist = d
+			best = landmark
+	if best.is_empty():
+		return "They admire your knowledge of every landmark in the valley."
+	var delta: Vector2 = world.tile_center(best["tile"].x, best["tile"].y) - player_actor["position"]
+	var vertical := "north" if delta.y < -40.0 else ("south" if delta.y > 40.0 else "")
+	var horizontal := "west" if delta.x < -40.0 else ("east" if delta.x > 40.0 else "")
+	var compass := vertical + horizontal
+	if compass.is_empty():
+		compass = "nearby"
+	return "They speak of %s to the %s." % [best["name"], compass]
+
+
 func _on_encounter() -> void:
-	if not _season_action_blocker().is_empty() or not _kinship_blocker().is_empty():
+	if not _season_action_blocker().is_empty():
+		return
+	if turn < 31:
+		if not _share_camp_blocker().is_empty():
+			return
+		var band_index := _nearby_shareable_band()
+		season_action_used = true
+		band_shares_completed += 1
+		band_share_ready_turn[band_index] = turn + SHARE_CAMP_COOLDOWN
+		_start_player_activity("meeting", 3.5)
+		food -= SHARE_CAMP_FOOD_COST
+		var knowledge_gain := mini(6, 99 - knowledge)
+		var cohesion_gain := mini(4, 100 - cohesion)
+		knowledge += knowledge_gain
+		cohesion += cohesion_gain
+		var band_name: String = ai_bands[band_index]["label"]
+		_event("SHARED CAMP  /  %s trade trails and stories. Food −%d, knowledge +%d, cohesion +%d. %s" % [band_name, SHARE_CAMP_FOOD_COST, knowledge_gain, cohesion_gain, _nearest_undiscovered_landmark_hint()])
+		_refresh_ui()
+		return
+	if not _kinship_blocker().is_empty():
 		return
 	season_action_used = true
 	kinship_recorded = true
@@ -1490,6 +1658,18 @@ func _on_encounter() -> void:
 	cohesion += cohesion_gain
 	_event("NEANDERTHAL MEETING  /  Two human groups share a refuge. Food −5, cohesion +%d. Shared descendants recorded." % cohesion_gain)
 	_refresh_ui()
+
+
+func _share_camp_blocker() -> String:
+	var band_index := _nearby_shareable_band()
+	if band_index < 0:
+		return "Approach an eligible neighboring band to share camp."
+	var ready_turn := int(band_share_ready_turn.get(band_index, 0))
+	if turn < ready_turn:
+		return "Shared recently — return in %d season(s)." % (ready_turn - turn)
+	if food < SHARE_CAMP_FOOD_COST:
+		return "Sharing camp requires %d food." % SHARE_CAMP_FOOD_COST
+	return ""
 
 
 func _kinship_blocker() -> String:
@@ -1542,6 +1722,8 @@ func _complete_succession() -> void:
 		return
 	succession_turn = -1
 	generation += 1
+	adult_age = 0
+	aging_warned = false
 	var cohesion_gain := mini(SUCCESSION_COHESION, 100 - cohesion)
 	cohesion += cohesion_gain
 	_event("SUCCESSION  /  You continue as your grown offspring. Generation %d, cohesion +%d." % [generation, cohesion_gain])
@@ -1581,7 +1763,8 @@ func _refresh_ui() -> void:
 		return
 	age_label.text = _format_year(year_bp)
 	period_label.text = _period_name()
-	stats_label.text = "FOOD   %d   ◇       KNOWLEDGE   %d   ◇       COHESION   %d   ◇       GEN   %d   ◇       HOMININS   %d" % [food, knowledge, cohesion, generation, PLAYER_COUNT]
+	var gen_text := "%d · aging" % generation if adult_age >= AGING_RANGE_PENALTY_AGE else str(generation)
+	stats_label.text = "FOOD   %d   ◇     KNOWLEDGE   %d   ◇     COHESION   %d   ◇     GEN   %s   ◇     HOMININS   %d" % [food, knowledge, cohesion, gen_text, PLAYER_COUNT]
 	var current := int(discovered[0])
 	if turn >= 29: current = 7
 	elif turn >= 25: current = 4
@@ -1682,11 +1865,20 @@ func _refresh_action_label() -> void:
 	if is_instance_valid(skills_overlay) and skills_overlay.visible:
 		_refresh_skills_panel()
 
-	var kinship_blocker := _kinship_blocker()
-	kinship_button.disabled = not blocker.is_empty() or not kinship_blocker.is_empty()
-	kinship_button.tooltip_text = blocker if not blocker.is_empty() else kinship_blocker
-	if kinship_button.tooltip_text.is_empty():
-		kinship_button.tooltip_text = "Spend 5 food to record shared descendants and gain up to 6 cohesion."
+	if turn < 31:
+		var share_blocker := _share_camp_blocker()
+		kinship_button.text = "Share −%d" % SHARE_CAMP_FOOD_COST
+		kinship_button.disabled = not blocker.is_empty() or not share_blocker.is_empty()
+		kinship_button.tooltip_text = blocker if not blocker.is_empty() else share_blocker
+		if kinship_button.tooltip_text.is_empty():
+			kinship_button.tooltip_text = "Share %d food with a nearby band for +6 knowledge, +4 cohesion, and a landmark tip." % SHARE_CAMP_FOOD_COST
+	else:
+		var kinship_blocker := _kinship_blocker()
+		kinship_button.text = "Meet kin"
+		kinship_button.disabled = not blocker.is_empty() or not kinship_blocker.is_empty()
+		kinship_button.tooltip_text = blocker if not blocker.is_empty() else kinship_blocker
+		if kinship_button.tooltip_text.is_empty():
+			kinship_button.tooltip_text = "Spend 5 food to record shared descendants and gain up to 6 cohesion."
 
 	_refresh_mate_button(blocker)
 
@@ -1801,11 +1993,15 @@ func _continue_keyboard_movement(delta: float) -> void:
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		if is_instance_valid(summary_overlay) and summary_overlay.visible:
+			_on_close_summary()
+			get_viewport().set_input_as_handled()
+			return
 		if is_instance_valid(skills_overlay) and skills_overlay.visible:
 			_on_toggle_skills()
 			get_viewport().set_input_as_handled()
 		return
-	if is_instance_valid(skills_overlay) and skills_overlay.visible:
+	if (is_instance_valid(skills_overlay) and skills_overlay.visible) or (is_instance_valid(summary_overlay) and summary_overlay.visible):
 		return
 	if event is InputEventMouseButton and event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 		if MAP_VIEW.has_point(event.position):
