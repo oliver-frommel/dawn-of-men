@@ -31,6 +31,15 @@ const BASE_PRACTICE_FOOD_COST := 8
 const HEARTH_PRACTICE_FOOD_COST := 4
 const EMBER_PRACTICE_FOOD_COST := 6
 const WET_WATERHOLE_FORAGE := 18
+const PREDATOR_DANGER_RANGE := 50.0
+const PREDATOR_COOLDOWN_SECS := 8.0
+const HUNT_RANGE := 86.0
+const SCAVENGE_BASE_FOOD := 14
+const SCAVENGE_FLAKING_FOOD := 20
+const HUNT_BASE_FOOD := 22
+const HUNT_COOPERATIVE_FOOD := 24
+const PREDATOR_SPECIES := ["Dinofelis", "Lion"]
+const PREY_SPECIES := ["Hipparion", "Antelope", "Gazelle", "Zebra", "Wildebeest", "Sivatherium", "Giraffe"]
 const WET_FORAGE_YIELDS := {
 	"woodland": 18, "wetland": 22, "savanna": 13, "river": 0,
 	"highland": 9, "dryland": 6, "volcanic": 6, "lake": 0
@@ -77,6 +86,10 @@ var discovered: Array[int] = [0]
 var learned_skills: Dictionary = {}
 var discovered_landmark_names: Dictionary = {}
 var depleted_tiles: Dictionary = {}
+var carcass_sites: Dictionary = {}
+var wildlife_sighted: Dictionary = {}
+var hunts_completed := 0
+var scavenges_completed := 0
 var event_log: Array[String] = ["The Rift Valley opens before your ancestors. Travel permanently charts the land.", "Afarensis bands learn the old paths."]
 var map_names := ["Laetoli", "Olduvai", "Turkana", "Afar", "Awash", "Omo", "Tugen Hills", "Lomekwi"]
 var toast := ""
@@ -172,7 +185,11 @@ func _process(delta: float) -> void:
 	if moved or bands_moved:
 		_refresh_mate_button(_season_action_blocker())
 	_sync_hominin_models(delta)
-	if _update_wildlife(delta) or moved or bands_need_redraw:
+	var wildlife_changed := _update_wildlife(delta)
+	_check_predator_encounters()
+	if moved or wildlife_changed:
+		_refresh_action_label()
+	if wildlife_changed or moved or bands_need_redraw:
 		queue_redraw()
 	if toast_timer > 0:
 		toast_timer -= delta
@@ -602,6 +619,9 @@ func _make_wildlife(entry: Dictionary) -> Dictionary:
 		"pause_min": float(profile["pause_min"]), "pause_max": float(profile["pause_max"]),
 		"roam_radius": int(profile["roam_radius"]),
 		"size": profile["size"], "species": species_name,
+		"is_predator": species_name in PREDATOR_SPECIES,
+		"is_prey": species_name in PREY_SPECIES,
+		"encounter_cooldown": 0.0,
 		"model": model, "opacity": 0.0, "replacement": {}
 	}
 
@@ -654,6 +674,8 @@ func _update_wildlife(delta: float) -> bool:
 	var changed := false
 	for i in range(wildlife.size()):
 		var animal := wildlife[i]
+		if float(animal.get("encounter_cooldown", 0.0)) > 0.0:
+			animal["encounter_cooldown"] = maxf(0.0, float(animal["encounter_cooldown"]) - delta)
 		var model = animal["model"]
 		var replacement: Dictionary = animal["replacement"]
 		var moved := _update_wildlife_roaming(animal, delta)
@@ -674,6 +696,8 @@ func _update_wildlife(delta: float) -> bool:
 			animal["opacity"] = next
 			model.set_opacity(next)
 			changed = true
+		if next > 0.3 and on_screen:
+			wildlife_sighted[animal["species"]] = true
 		if moved:
 			_position_wildlife_model(animal)
 			if next > 0.0 and on_screen:
@@ -681,6 +705,92 @@ func _update_wildlife(delta: float) -> bool:
 		if next > 0.0:
 			model.set_motion(animal["moving"], animal["heading"], delta)
 	return changed
+
+
+func _check_predator_encounters() -> void:
+	if _run_ended():
+		return
+	var player_pos: Vector2 = player_actor["position"]
+	for animal in wildlife:
+		if not animal.get("is_predator", false):
+			continue
+		if float(animal.get("encounter_cooldown", 0.0)) > 0.0 or float(animal["opacity"]) < 0.25:
+			continue
+		var pos: Vector2 = animal["at"]
+		if player_pos.distance_squared_to(pos) > PREDATOR_DANGER_RANGE * PREDATOR_DANGER_RANGE:
+			continue
+		if not world.land_segment_clear(player_pos, pos):
+			continue
+		animal["encounter_cooldown"] = PREDATOR_COOLDOWN_SECS
+		animal["pause"] = 0.0
+		_pick_wildlife_goal(animal)
+		movement_key = KEY_NONE
+		var pred_name: String = animal["species"]
+		if _has_skill("ember_carrying"):
+			cohesion = mini(100, cohesion + 2)
+			_event("PREDATOR DETERRED  /  Glowing embers drive off a stalking %s. Cohesion +2." % pred_name)
+		elif _has_skill("stone_flaking"):
+			food = maxi(0, food - 2)
+			cohesion = mini(100, cohesion + 1)
+			_event("PREDATOR HELD OFF  /  Flaked stones and shouts keep a %s at bay. Food −2, cohesion +1." % pred_name)
+		else:
+			food = maxi(0, food - 6)
+			cohesion = maxi(0, cohesion - 5)
+			_event("PREDATOR AMBUSH  /  A %s lunges from cover! You escape shaken. Food −6, cohesion −5." % pred_name)
+			if cohesion == 0:
+				lineage_ended = true
+				player_actor["route"] = []
+				_event("LINEAGE LOST  /  Shaken and scattered by predators, your band cannot hold together.")
+		_refresh_ui()
+		queue_redraw()
+		return
+
+
+func _nearby_huntable_prey() -> Dictionary:
+	if not (_has_skill("stone_flaking") or turn >= 13):
+		return {}
+	var player_pos: Vector2 = player_actor["position"]
+	var best: Dictionary = {}
+	var best_dist := HUNT_RANGE * HUNT_RANGE
+	for animal in wildlife:
+		if not animal.get("is_prey", false) or float(animal["opacity"]) < 0.25:
+			continue
+		var pos: Vector2 = animal["at"]
+		var d2 := player_pos.distance_squared_to(pos)
+		if d2 <= best_dist and world.land_segment_clear(player_pos, pos):
+			best_dist = d2
+			best = animal
+	return best
+
+
+func _tick_carcass_sites() -> void:
+	var expired: Array = []
+	for id in carcass_sites:
+		var remaining := int(carcass_sites[id]) - 1
+		if remaining <= 0:
+			expired.append(id)
+		else:
+			carcass_sites[id] = remaining
+	for id in expired:
+		carcass_sites.erase(id)
+	var player_tile: Vector2i = world.tile_from_world(player_actor["position"])
+	for animal in wildlife:
+		if carcass_sites.size() >= 2:
+			break
+		if not animal.get("is_predator", false):
+			continue
+		var tile: Vector2i = world.tile_from_world(animal["at"])
+		if tile == player_tile:
+			for edge in WORLD_MAP_SCRIPT.TILE_EDGES:
+				var neighbor: Vector2i = tile + edge
+				if neighbor != player_tile and world.has_land_route_point(neighbor):
+					tile = neighbor
+					break
+		if tile == player_tile or not world.has_land_route_point(tile):
+			continue
+		var id: int = world.tile_id(tile)
+		if not carcass_sites.has(id):
+			carcass_sites[id] = 2
 
 
 func _position_wildlife_model(animal: Dictionary) -> void:
@@ -711,7 +821,7 @@ func _wildlife_caption() -> String:
 func _draw() -> void:
 	map_renderer.draw_world(self, W, H)
 	draw_set_transform(_map_draw_origin(), 0.0, Vector2.ONE * zoom_level)
-	map_renderer.draw_map(self, MAP_VIEW, zoom_level, _screen_to_world, explored_tiles, discovered_landmarks, turn % 2 == 1, depleted_tiles)
+	map_renderer.draw_map(self, MAP_VIEW, zoom_level, _screen_to_world, explored_tiles, discovered_landmarks, turn % 2 == 1, depleted_tiles, carcass_sites)
 	map_renderer.draw_actor_shadows(self, MAP_VIEW, _world_to_screen, player_actor, ai_bands, wildlife)
 	draw_set_transform(Vector2.ZERO)
 	if is_instance_valid(hominin_viewport):
@@ -1002,6 +1112,7 @@ func _on_advance() -> void:
 	season_action_used = false
 	moves_remaining = _max_travel_range()
 	_tick_depleted_tiles(not entering_dry)
+	_tick_carcass_sites()
 	year_bp = max(0, year_bp - 100)
 	food = maxi(0, food - food_cost)
 	var low_food_penalty := LOW_FOOD_COHESION_PENALTY
@@ -1108,16 +1219,71 @@ func _forage_food_gain(tile: Vector2i) -> int:
 	return mini(yield_on_terrain, 100 - food)
 
 
+func _scavenge_food_gain(tile: Vector2i) -> int:
+	if not carcass_sites.has(world.tile_id(tile)):
+		return 0
+	var base := SCAVENGE_FLAKING_FOOD if _has_skill("stone_flaking") else SCAVENGE_BASE_FOOD
+	return mini(base, 100 - food)
+
+
+func _hunt_food_gain() -> int:
+	var base := HUNT_COOPERATIVE_FOOD if turn >= 25 else HUNT_BASE_FOOD
+	return mini(base, 100 - food)
+
+
 func _on_gather() -> void:
 	if not _season_action_blocker().is_empty():
 		return
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
+	var tile_id: int = world.tile_id(tile)
+	if carcass_sites.has(tile_id):
+		var scavenge_gain := _scavenge_food_gain(tile)
+		if scavenge_gain == 0:
+			return
+		var cohesion_gain := mini(2, 100 - cohesion)
+		season_action_used = true
+		carcass_sites.erase(tile_id)
+		scavenges_completed += 1
+		_start_player_activity("scavenging", 3.0)
+		food += scavenge_gain
+		cohesion += cohesion_gain
+		if food > 0:
+			starvation_warned = false
+		var marrow := " and cracked marrow" if _has_skill("stone_flaking") else ""
+		_event("SCAVENGE  /  You recover meat%s from a predator kill. Food +%d, cohesion +%d." % [marrow, scavenge_gain, cohesion_gain])
+		_refresh_ui()
+		queue_redraw()
+		return
+	var prey := _nearby_huntable_prey()
+	if not prey.is_empty():
+		var hunt_gain := _hunt_food_gain()
+		if hunt_gain == 0:
+			return
+		season_action_used = true
+		hunts_completed += 1
+		_start_player_activity("hunting", 3.0)
+		food += hunt_gain
+		var cooperative := turn >= 25
+		var cohesion_delta := mini(3, 100 - cohesion) if cooperative else -1
+		cohesion = clampi(cohesion + cohesion_delta, 0, 100)
+		if food > 0:
+			starvation_warned = false
+		var species_name: String = prey["species"]
+		prey["pause"] = 0.0
+		_pick_wildlife_goal(prey)
+		if cooperative:
+			_event("COOPERATIVE HUNT  /  You coordinate to take a %s. Food +%d, cohesion +%d." % [species_name, hunt_gain, cohesion_delta])
+		else:
+			_event("TRACK & HUNT  /  You bring down a %s on the plains. Food +%d, cohesion −1." % [species_name, hunt_gain])
+		_refresh_ui()
+		queue_redraw()
+		return
 	var food_gain := _forage_food_gain(tile)
 	if food_gain == 0:
 		return
 	var cohesion_gain := mini(2, 100 - cohesion)
 	season_action_used = true
-	depleted_tiles[world.tile_id(tile)] = 1 if tile in WORLD_MAP_SCRIPT.SPRING_TILES else 2
+	depleted_tiles[tile_id] = 1 if tile in WORLD_MAP_SCRIPT.SPRING_TILES else 2
 	_start_player_activity("gathering", 3.0)
 	food += food_gain
 	cohesion += cohesion_gain
@@ -1335,19 +1501,32 @@ func _refresh_action_label() -> void:
 
 	var blocker := _season_action_blocker()
 	var tile_id: int = world.tile_id(tile)
-	var forage_yield := _forage_food_gain(tile)
-	forage_button.text = "Forage +%d" % forage_yield
-	forage_button.disabled = not blocker.is_empty() or forage_yield == 0
-	forage_button.tooltip_text = blocker
-	if blocker.is_empty():
-		if food == 100:
-			forage_button.tooltip_text = "Food stores are full."
-		elif depleted_tiles.has(tile_id):
-			forage_button.tooltip_text = "Foraged recently — recovers in %d season(s)." % int(depleted_tiles[tile_id])
-		elif forage_yield == 0:
-			forage_button.tooltip_text = "Find land to forage."
-		else:
-			forage_button.tooltip_text = "Gather %d food here and gain up to 2 cohesion. Patch rests after foraging." % forage_yield
+	var prey := _nearby_huntable_prey()
+	if carcass_sites.has(tile_id):
+		var scavenge_yield := _scavenge_food_gain(tile)
+		forage_button.text = "Scavenge +%d" % scavenge_yield
+		forage_button.disabled = not blocker.is_empty() or scavenge_yield == 0
+		forage_button.tooltip_text = blocker if not blocker.is_empty() else ("Food stores are full." if food == 100 else "Scavenge %d food from a predator kill (+2 cohesion)." % scavenge_yield)
+	elif not prey.is_empty():
+		var hunt_yield := _hunt_food_gain()
+		forage_button.text = "Hunt +%d" % hunt_yield
+		forage_button.disabled = not blocker.is_empty() or hunt_yield == 0
+		var hunt_note := "+3 cohesion" if turn >= 25 else "−1 cohesion"
+		forage_button.tooltip_text = blocker if not blocker.is_empty() else ("Food stores are full." if food == 100 else "Hunt nearby %s for %d food (%s)." % [prey["species"], hunt_yield, hunt_note])
+	else:
+		var forage_yield := _forage_food_gain(tile)
+		forage_button.text = "Forage +%d" % forage_yield
+		forage_button.disabled = not blocker.is_empty() or forage_yield == 0
+		forage_button.tooltip_text = blocker
+		if blocker.is_empty():
+			if food == 100:
+				forage_button.tooltip_text = "Food stores are full."
+			elif depleted_tiles.has(tile_id):
+				forage_button.tooltip_text = "Foraged recently — recovers in %d season(s)." % int(depleted_tiles[tile_id])
+			elif forage_yield == 0:
+				forage_button.tooltip_text = "Find land to forage."
+			else:
+				forage_button.tooltip_text = "Gather %d food here and gain up to 2 cohesion. Patch rests after foraging." % forage_yield
 
 	var new_tiles := _unmapped_scout_tiles(tile) if blocker.is_empty() else 0
 	scout_button.disabled = not blocker.is_empty() or new_tiles == 0

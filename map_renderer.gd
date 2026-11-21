@@ -25,7 +25,8 @@ func draw_map(
 	explored_tiles: Dictionary,
 	discovered_landmarks: Dictionary,
 	is_dry_season := false,
-	depleted_tiles: Dictionary = {}
+	depleted_tiles: Dictionary = {},
+	carcass_sites: Dictionary = {}
 ) -> void:
 	var visible: Array[Vector2i] = []
 	var extent := Vector2(WorldMapScript.TILE_W * 0.5, WorldMapScript.TILE_H * 0.5 + 72.0) * zoom_level
@@ -51,10 +52,13 @@ func draw_map(
 				_draw_unexplored_tile(canvas, center, tile.x, tile.y)
 	for tile in visible:
 		var center := world.tile_center(tile.x, tile.y)
+		var id := world.tile_id(tile)
 		_draw_exploration_frontier(canvas, center, tile, explored_tiles)
 		_draw_terrain_details(canvas, center, world.terrain_at(tile), tile.x, tile.y)
-		if depleted_tiles.has(world.tile_id(tile)):
+		if depleted_tiles.has(id):
 			_draw_depleted_mark(canvas, center)
+		if carcass_sites.has(id):
+			_draw_carcass_icon(canvas, center)
 	for tile in visible:
 		var id := world.tile_id(tile)
 		if discovered_landmarks.has(id):
@@ -84,6 +88,13 @@ func draw_actor_shadows(
 	for animal in wildlife:
 		var position: Vector2 = animal["at"]
 		if animal["opacity"] > 0.0 and map_view.grow(65.0).has_point(world_to_screen.call(position)):
+			if animal.get("is_predator", false):
+				var ring := PackedVector2Array()
+				for i in range(20):
+					var a := TAU * float(i) / 20.0
+					ring.append(position + Vector2(cos(a) * 44.0, sin(a) * 24.0))
+				ring.append(ring[0])
+				canvas.draw_polyline(ring, Color(0.84, 0.36, 0.25, 0.34 * float(animal["opacity"])), 1.3, true)
 			draw_ellipse_shadow(canvas, position + Vector2(0, 4), animal["size"], 0.22 * animal["opacity"])
 
 
@@ -274,6 +285,16 @@ func _draw_depleted_mark(canvas: CanvasItem, center: Vector2) -> void:
 		ring.append(center + Vector2(cos(a) * 18.0, sin(a) * 9.0))
 	ring.append(ring[0])
 	canvas.draw_polyline(ring, Color("#8b7450", 0.55), 1.1, true)
+
+
+func _draw_carcass_icon(canvas: CanvasItem, center: Vector2) -> void:
+	var badge := center + Vector2(-18, -6)
+	canvas.draw_circle(badge, 7.5, Color("#3a2722", 0.92))
+	var bone := Color("#efe2c6")
+	canvas.draw_line(badge + Vector2(-4, -2), badge + Vector2(4, 2), bone, 1.8, true)
+	canvas.draw_line(badge + Vector2(-4, 2), badge + Vector2(4, -2), bone, 1.8, true)
+	canvas.draw_circle(badge + Vector2(-4, -2), 1.4, bone)
+	canvas.draw_circle(badge + Vector2(4, 2), 1.4, bone)
 
 
 func _draw_landmark_icon(canvas: CanvasItem, center: Vector2, kind: String, is_dry_season := false) -> void:
@@ -593,6 +614,12 @@ func _draw_player_activity(canvas: CanvasItem, center: Vector2, activity: String
 			canvas.draw_line(patch, patch + Vector2(0, -13), Color("#7d9b55"), 2.0, true)
 			canvas.draw_circle(patch + Vector2(-4, -11), 3.0, Color("#d2a95e"))
 			canvas.draw_circle(patch + Vector2(4, -12), 3.0, Color("#c8754e"))
+		"scavenging":
+			label = "SCAVENGING"
+			color = Color("#e3be84")
+		"hunting":
+			label = "HUNTING"
+			color = Color("#e39f73")
 		"learning":
 			label = "LEARNING"
 			color = Color("#f0c77f")
