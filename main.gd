@@ -16,7 +16,7 @@ const TRAIL_READING_SPEED_BONUS := 12.0
 const ERECTUS_SPEED_BONUS := 16.0
 const AGING_SPEED_PENALTY := 8.0
 const TRAVEL_ACCELERATION := 260.0
-const PLAYER_COUNT := 1
+const PLAYER_COUNT := 3
 const NEIGHBOR_BAND_SIZE := 3
 const BAND_FADE_IN := 0.5
 const BAND_FADE_OUT := 0.85
@@ -33,6 +33,10 @@ const WINDBREAKS_LOW_FOOD_COHESION_PENALTY := -1
 const STARVATION_COHESION_PENALTY := -6
 const MATING_FOOD_COST := 8
 const MATE_RANGE := 76.0
+const MATE_COMBAT_BONUS := 1
+const MATE_GATHER_BONUS := 2
+const MATE_UPKEEP := 1
+const CHILD_UPKEEP := 1
 const SUCCESSION_SEASONS := 2
 const SUCCESSION_COHESION := 8
 const AGING_RANGE_PENALTY_AGE := 8
@@ -111,6 +115,9 @@ var time_scale := 1.0
 var generation := 1
 var adult_age := 0
 var aging_warned := false
+var has_mate := false
+var has_child := false
+var child_stage := 0
 var succession_turn := -1
 var kinship_recorded := false
 var lineage_ended := false
@@ -634,9 +641,33 @@ func _sync_hominin_band(actor: Dictionary, band_index: int, player_controlled: b
 	var band_on_screen := has_pos and MAP_VIEW.grow(150.0 * zoom_level).has_point(_world_to_screen(center))
 	for slot in range(model_count):
 		var model_index := model_offset + slot
-		var person := 1 if player_controlled else slot
-		var wrapping := hide_wrap_unlocked and (person + band_index) % 2 == 0
-		var variant := generation % 3 if player_controlled else person
+		var person := slot
+		var active_slot := true
+		var slot_scale := 1.0
+		var slot_offset := Vector2((person - 1) * 25, -3 + (person % 2) * 3)
+		var slot_phase_offset := float(person) * TAU / 3.0
+		var slot_phase_mult := 1.0
+		var variant := person
+		if player_controlled:
+			if slot == 0:
+				variant = generation % 3
+				slot_offset = Vector2(-10, 0) if has_mate else Vector2.ZERO
+				slot_phase_offset = 0.0
+			elif slot == 1:
+				active_slot = has_mate
+				variant = (generation + 1) % 3
+				slot_offset = Vector2(14, -2)
+				slot_phase_offset = 1.9
+			else:
+				active_slot = has_child
+				variant = (generation + 2) % 3
+				slot_scale = 0.74 if child_stage >= 2 else 0.58
+				var heading_vec: Vector2 = actor["heading"]
+				var trail_dir := -heading_vec.normalized() if heading_vec.length_squared() > 0.01 else Vector2(0.0, 1.0)
+				slot_offset = Vector2(2, 7) + trail_dir * 8.0
+				slot_phase_offset = 3.6
+				slot_phase_mult = 1.35
+		var wrapping := hide_wrap_unlocked and (not (player_controlled and slot == 2)) and (person + band_index) % 2 == 0
 		var signature := "%d:%d:%d:%s" % [current_stage, variant, int(robust), str(wrapping)]
 		var model: Node3D
 		if model_index >= hominin_models.size():
@@ -656,12 +687,12 @@ func _sync_hominin_band(actor: Dictionary, band_index: int, player_controlled: b
 				hominin_models[model_index] = model
 				hominin_stage.add_child(model)
 				_request_3d_update()
-		if not band_on_screen:
+		if not band_on_screen or not active_slot:
 			model.visible = false
 			continue
 		model.set_opacity(opacity)
-		var ground := center + Vector2((person - 1) * 25, -3 + (person % 2) * 3)
-		if not player_controlled:
+		var ground := center + slot_offset
+		if not player_controlled or slot > 0:
 			while not world.land_segment_clear(center, ground):
 				if ground.distance_squared_to(center) <= 1.0:
 					ground = center
@@ -674,9 +705,9 @@ func _sync_hominin_band(actor: Dictionary, band_index: int, player_controlled: b
 			continue
 		var local := screen - MAP_VIEW.position
 		model.position = Vector3(local.x / 45.0, (MAP_VIEW.size.y - local.y) / 45.0, screen.y / MAP_VIEW.size.y * 0.02)
-		model.scale = Vector3.ONE * 0.55 * zoom_level
+		model.scale = Vector3.ONE * 0.55 * slot_scale * zoom_level
 		if live_position:
-			model.set_pose(actor["moving"], float(actor["gait_phase"]) + float(person) * TAU / 3.0, actor["heading"], delta)
+			model.set_pose(actor["moving"], float(actor["gait_phase"]) * slot_phase_mult + slot_phase_offset, actor["heading"], delta)
 
 
 func _wildlife_epoch() -> int:
@@ -934,6 +965,8 @@ func _update_combat_flashes(delta: float) -> bool:
 
 func _player_combat_strength(include_flint := true) -> int:
 	var strength := 1
+	if has_mate:
+		strength += MATE_COMBAT_BONUS
 	if _has_skill("stone_flaking"):
 		strength += 2
 	if _has_skill("hide_working"):
@@ -1791,14 +1824,15 @@ func _practice_food_cost(tile: Vector2i) -> int:
 
 
 func _season_food_cost(tile: Vector2i, season_turn: int) -> int:
+	var family_upkeep := (MATE_UPKEEP if has_mate else 0) + (CHILD_UPKEEP if has_child else 0)
 	if season_turn % 2 == 0:
-		return WET_SEASON_FOOD_COST
+		return WET_SEASON_FOOD_COST + family_upkeep
 	if world.near_permanent_water(tile):
-		return DRY_SEASON_WATER_FOOD_COST
+		return DRY_SEASON_WATER_FOOD_COST + family_upkeep
 	var cost := DRY_SEASON_CARRY_WATER_FOOD_COST if _has_skill("carry_water") else DRY_SEASON_FOOD_COST
 	if int(pack["gourd"]) > 0:
 		cost = maxi(DRY_SEASON_WATER_FOOD_COST, cost - 2)
-	return cost
+	return cost + family_upkeep
 
 
 func _tick_depleted_tiles(entering_wet: bool) -> void:
@@ -2096,8 +2130,15 @@ func _complete_active_task() -> void:
 			cohesion += cohesion_gain
 			_event("NEANDERTHAL MEETING  /  Two human groups share a refuge. Food −5, cohesion +%d. Shared descendants recorded." % cohesion_gain)
 		"mate":
+			has_mate = true
+			has_child = true
+			child_stage = 1
+			player_actor["family_size"] = 3
 			succession_turn = turn + SUCCESSION_SEASONS
-			_event("PAIRING  /  You form a pair with an adult from a neighboring band. Food −%d. Your offspring takes over in %d seasons." % [MATING_FOOD_COST, SUCCESSION_SEASONS])
+			_sync_hominin_models()
+			_request_3d_update()
+			_spawn_floating_text("Mate joined · Offspring born!", player_actor["position"], Color("#f2c5a0"))
+			_event("PAIRING  /  A mate joins your band and an offspring is born. Food −%d (+%d strength, +%d gather; +%d upkeep while raising young). Succession in %d seasons." % [MATING_FOOD_COST, MATE_COMBAT_BONUS, MATE_GATHER_BONUS, MATE_UPKEEP + CHILD_UPKEEP, SUCCESSION_SEASONS])
 	_refresh_ui()
 	_redraw_dynamic()
 
@@ -2265,6 +2306,8 @@ func _forage_food_gain(tile: Vector2i) -> int:
 	if fire_state == "burning":
 		return 0
 	if yield_on_terrain > 0:
+		if has_mate:
+			yield_on_terrain += MATE_GATHER_BONUS
 		if not is_dry and _has_skill("plant_lore") and terrain in ["woodland", "wetland"]:
 			yield_on_terrain += 4
 		if is_dry and _has_skill("food_drying") and not world.near_permanent_water(tile):
@@ -2287,6 +2330,8 @@ func _scavenge_food_gain(tile: Vector2i) -> int:
 
 func _hunt_food_gain() -> int:
 	var base := HUNT_COOPERATIVE_FOOD if turn >= 25 else HUNT_BASE_FOOD
+	if has_mate:
+		base += MATE_GATHER_BONUS
 	if int(pack["stone"]) > 0:
 		base += 6
 	return mini(base, 100 - food)
@@ -2490,15 +2535,28 @@ func _on_mate() -> void:
 
 
 func _complete_succession() -> void:
+	if has_child and succession_turn >= 0 and turn < succession_turn:
+		child_stage = 2
+		_sync_hominin_models()
+		_request_3d_update()
+		_spawn_floating_text("Offspring growing strong", player_actor["position"], Color("#e7d39f"))
+		return
 	if turn != succession_turn:
 		return
 	succession_turn = -1
 	generation += 1
 	adult_age = 0
 	aging_warned = false
+	has_mate = false
+	has_child = false
+	child_stage = 0
+	player_actor["family_size"] = 1
 	var cohesion_gain := mini(SUCCESSION_COHESION, 100 - cohesion)
 	cohesion += cohesion_gain
-	_event("SUCCESSION  /  You continue as your grown offspring. Generation %d, cohesion +%d." % [generation, cohesion_gain])
+	_sync_hominin_models()
+	_request_3d_update()
+	_spawn_floating_text("Generation %d · New Adult!" % generation, player_actor["position"], Color("#f2d594"))
+	_event("SUCCESSION  /  Your grown offspring steps forward to lead the next generation. Generation %d, cohesion +%d." % [generation, cohesion_gain])
 
 
 func _event(text: String) -> void:
@@ -2533,7 +2591,14 @@ func _period_name() -> String:
 func _refresh_stats_bar() -> void:
 	if not is_instance_valid(stats_label):
 		return
-	var gen_text := "%d · aging" % generation if adult_age >= AGING_RANGE_PENALTY_AGE else str(generation)
+	var gen_tags: Array[String] = [str(generation)]
+	if has_mate and has_child:
+		gen_tags.append("family")
+	elif has_mate:
+		gen_tags.append("pair")
+	if adult_age >= AGING_RANGE_PENALTY_AGE:
+		gen_tags.append("aging")
+	var gen_text := " · ".join(gen_tags)
 	var wound_tag := "   ◇   WOUNDED" if wounded_seasons > 0 else ""
 	stats_label.text = "FOOD   %d   ◇   KNOWLEDGE   %d   ◇   COHESION   %d   ◇   GEN   %s%s" % [food, knowledge, cohesion, gen_text, wound_tag]
 
@@ -2719,7 +2784,7 @@ func _refresh_mate_button(action_blocker: String) -> void:
 	if not _run_ended() and (succession_turn >= 0 or blocker.is_empty()):
 		blocker = _mating_blocker()
 	mate_button.disabled = not blocker.is_empty()
-	mate_button.tooltip_text = blocker if mate_button.disabled else "Spend %d food (%.1fs) to pair. Continue as your offspring in %d seasons." % [MATING_FOOD_COST, TASK_MATE_DURATION, SUCCESSION_SEASONS]
+	mate_button.tooltip_text = blocker if mate_button.disabled else "Spend %d food (%.1fs) to pair. A mate joins you (+%d strength, +%d gather) and you raise an offspring (+%d upkeep) for %d seasons." % [MATING_FOOD_COST, TASK_MATE_DURATION, MATE_COMBAT_BONUS, MATE_GATHER_BONUS, MATE_UPKEEP + CHILD_UPKEEP, SUCCESSION_SEASONS]
 
 
 func _refresh_season_bar(tile: Vector2i) -> void:

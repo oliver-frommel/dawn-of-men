@@ -812,7 +812,9 @@ func draw_actor_shadows(
 ) -> void:
 	var player_position: Vector2 = player_actor["position"]
 	if map_view.grow(65.0).has_point(world_to_screen.call(player_position)):
-		draw_ellipse_shadow(canvas, player_position + Vector2(0.0, 4.0), Vector2(16.0, 5.0))
+		var family_size := int(player_actor.get("family_size", 1))
+		var shadow_radii := Vector2(16.0, 5.0) if family_size <= 1 else (Vector2(28.0, 7.0) if family_size == 2 else Vector2(34.0, 8.5))
+		draw_ellipse_shadow(canvas, player_position + Vector2(0.0, 4.0), shadow_radii)
 	for band in ai_bands:
 		var opacity: float = band["opacity"]
 		if opacity <= 0.0:
