@@ -408,7 +408,7 @@ func _draw_terrain_ground(canvas: CanvasItem, center: Vector2, tile: Vector2i, t
 
 	canvas.draw_polygon(corners, PackedColorArray([Color.WHITE]), PackedVector2Array(WorldMapScript.SHORE_UVS), world.get_shoreline_texture(tile))
 	for ripple in shore["ripples"]:
-		canvas.draw_line(center + ripple[0], center + ripple[1], Color("#b3d7c5", 0.20), 0.8, true)
+		canvas.draw_line(center + ripple[0], center + ripple[1], Color("#b3d7c5", 0.20), -1.0, false)
 
 
 func _draw_terrain_details(canvas: CanvasItem, center: Vector2, terrain: String, x: int, y: int, is_dry_season := false) -> void:
@@ -465,7 +465,7 @@ func _draw_shoreline_details(canvas: CanvasItem, center: Vector2, shore: Diction
 		elif not bank:
 			_draw_tall_grass(canvas, point, 0.58, Color("#9b9358"))
 		else:
-			canvas.draw_circle(point, 0.95, Color("#665c44", 0.65), true, -1.0, true)
+			canvas.draw_circle(point, 0.95, Color("#665c44", 0.65))
 
 
 func _draw_exploration_frontier(canvas: CanvasItem, center: Vector2, tile: Vector2i, explored_tiles: Dictionary) -> void:
@@ -495,7 +495,7 @@ func _draw_depleted_mark(canvas: CanvasItem, center: Vector2) -> void:
 		var a := TAU * float(i) / 12.0
 		ring.append(center + Vector2(cos(a) * 18.0, sin(a) * 9.0))
 	ring.append(ring[0])
-	canvas.draw_polyline(ring, Color("#8b7450", 0.55), 1.1, true)
+	canvas.draw_polyline(ring, Color("#8b7450", 0.55), -1.0, false)
 
 
 func _draw_carcass_icon(canvas: CanvasItem, center: Vector2) -> void:
@@ -614,7 +614,7 @@ func _draw_landmark_icon(canvas: CanvasItem, center: Vector2, kind: String, is_d
 
 
 func _draw_flower(canvas: CanvasItem, point: Vector2, color: Color) -> void:
-	canvas.draw_line(point + Vector2(0, 3), point + Vector2(0, -2), Color("#667448"), 1.0, true)
+	canvas.draw_line(point + Vector2(0, 3), point + Vector2(0, -2), Color("#667448"), -1.0, false)
 	canvas.draw_circle(point + Vector2(-2, -3), 1.5, color.darkened(0.08))
 	canvas.draw_circle(point + Vector2(2, -3), 1.5, color.lightened(0.08))
 	canvas.draw_circle(point + Vector2(0, -4), 1.4, Color("#f0d38d"))
@@ -626,15 +626,15 @@ func _draw_boulder(canvas: CanvasItem, point: Vector2, size: float) -> void:
 		point + Vector2(1 * size, -5 * size), point + Vector2(6 * size, -2 * size),
 		point + Vector2(5 * size, 3 * size)
 	]), Color("#776f57"))
-	canvas.draw_line(point + Vector2(-3 * size, -2 * size), point + Vector2(1 * size, -4 * size), Color("#b2a27a", 0.7), 1.0, true)
+	canvas.draw_line(point + Vector2(-3 * size, -2 * size), point + Vector2(1 * size, -4 * size), Color("#b2a27a", 0.7), -1.0, false)
 
 
 func _draw_reeds(canvas: CanvasItem, point: Vector2) -> void:
 	var reed := Color("#9ba36a", 0.8)
-	canvas.draw_line(point, point + Vector2(-3, -10), reed, 1.2, true)
-	canvas.draw_line(point + Vector2(2, 1), point + Vector2(3, -12), reed, 1.2, true)
-	canvas.draw_line(point + Vector2(5, 2), point + Vector2(9, -7), reed, 1.2, true)
-	canvas.draw_line(point + Vector2(-2, 1), point + Vector2(-7, -6), reed.darkened(0.12), 1.0, true)
+	canvas.draw_line(point, point + Vector2(-3, -10), reed, -1.0, false)
+	canvas.draw_line(point + Vector2(2, 1), point + Vector2(3, -12), reed, -1.0, false)
+	canvas.draw_line(point + Vector2(5, 2), point + Vector2(9, -7), reed, -1.0, false)
+	canvas.draw_line(point + Vector2(-2, 1), point + Vector2(-7, -6), reed.darkened(0.12), -1.0, false)
 	canvas.draw_circle(point + Vector2(3, -12), 1.2, Color("#6f5e3e"))
 	canvas.draw_circle(point + Vector2(-3, -10), 1.0, Color("#796746"))
 
@@ -642,9 +642,9 @@ func _draw_reeds(canvas: CanvasItem, point: Vector2) -> void:
 func _draw_tree(canvas: CanvasItem, point: Vector2, size: float) -> void:
 	var scale := 0.68 + size * 0.38
 	draw_ellipse_shadow(canvas, point + Vector2(1, 5), Vector2(12, 3) * scale)
-	canvas.draw_line(point + Vector2(0, 7 * scale), point + Vector2(0, -8 * scale), Color("#68563a"), 2.2 * scale, true)
-	canvas.draw_line(point + Vector2(0, -5 * scale), point + Vector2(-7, -11) * scale, Color("#735f3e"), 1.4 * scale, true)
-	canvas.draw_line(point + Vector2(1, -7 * scale), point + Vector2(8, -12) * scale, Color("#594a34"), 1.2 * scale, true)
+	canvas.draw_line(point + Vector2(0, 7 * scale), point + Vector2(0, -8 * scale), Color("#68563a"), 2.2 * scale, false)
+	canvas.draw_line(point + Vector2(0, -5 * scale), point + Vector2(-7, -11) * scale, Color("#735f3e"), 1.4 * scale, false)
+	canvas.draw_line(point + Vector2(1, -7 * scale), point + Vector2(8, -12) * scale, Color("#594a34"), -1.0, false)
 	canvas.draw_colored_polygon(PackedVector2Array([
 		point + Vector2(-12 * scale, -5 * scale), point + Vector2(-8 * scale, -13 * scale),
 		point + Vector2(-2 * scale, -12 * scale), point + Vector2(3 * scale, -17 * scale),
@@ -777,16 +777,16 @@ func _draw_hill_dome(
 	for i in range(2, 7):
 		brow.append(ridge[i].lerp(lower[i], 0.16))
 	if brow.size() >= 2:
-		canvas.draw_polyline(brow, lit.lightened(0.24) * Color(1, 1, 1, 0.55), 1.4, true)
+		canvas.draw_polyline(brow, lit.lightened(0.24) * Color(1, 1, 1, 0.55), 1.4, false)
 	var shadow_fold := PackedVector2Array()
 	for i in range(8, steps):
 		shadow_fold.append(ridge[i].lerp(lower[i], 0.34))
 	if shadow_fold.size() >= 2:
-		canvas.draw_polyline(shadow_fold, shade.darkened(0.25) * Color(1, 1, 1, 0.45), 1.3, true)
+		canvas.draw_polyline(shadow_fold, shade.darkened(0.25) * Color(1, 1, 1, 0.45), 1.3, false)
 	if rocky:
 		var crown := ridge[steps / 2].lerp(lower[steps / 2], 0.28)
-		canvas.draw_line(crown + Vector2(-8, 2), crown + Vector2(5, 5), Color("#ebe0c5", 0.42), 1.1, true)
-		canvas.draw_line(crown + Vector2(-12, 8), crown + Vector2(2, 11), Color("#46403a", 0.36), 1.1, true)
+		canvas.draw_line(crown + Vector2(-8, 2), crown + Vector2(5, 5), Color("#ebe0c5", 0.42), -1.0, false)
+		canvas.draw_line(crown + Vector2(-12, 8), crown + Vector2(2, 11), Color("#46403a", 0.36), -1.0, false)
 
 
 func _draw_volcanic_tile(canvas: CanvasItem, center: Vector2, x: int, y: int, variation: float, is_dry_season: bool) -> void:
@@ -800,13 +800,13 @@ func _draw_volcanic_tile(canvas: CanvasItem, center: Vector2, x: int, y: int, va
 	_draw_hill_dome(canvas, center + Vector2(-4, 6), 31.0, h, lean, lit, mid, shade, skirt, true)
 	# Subtle weathered caldera rim at the summit.
 	var rim := center + Vector2(-4 + lean, 6 - h + 3.0)
-	canvas.draw_arc(rim, 4.5, PI, TAU, 10, Color("#bf6b4a", 0.85), 1.5, true)
+	canvas.draw_arc(rim, 4.5, PI, TAU, 10, Color("#bf6b4a", 0.85), 1.5, false)
 
 
 func _draw_grass(canvas: CanvasItem, point: Vector2, color: Color) -> void:
-	canvas.draw_line(point, point + Vector2(-3, -7), color, 1.0, true)
-	canvas.draw_line(point + Vector2(2, 1), point + Vector2(5, -6), color, 1.0, true)
-	canvas.draw_line(point + Vector2(6, 2), point + Vector2(9, -3), color, 1.0, true)
+	canvas.draw_line(point, point + Vector2(-3, -7), color, -1.0, false)
+	canvas.draw_line(point + Vector2(2, 1), point + Vector2(5, -6), color, -1.0, false)
+	canvas.draw_line(point + Vector2(6, 2), point + Vector2(9, -3), color, -1.0, false)
 
 
 func _draw_ground_texture(canvas: CanvasItem, center: Vector2, terrain: String, x: int, y: int) -> void:
@@ -825,7 +825,7 @@ func _draw_ground_texture(canvas: CanvasItem, center: Vector2, terrain: String, 
 		if i % 3 == 0:
 			canvas.draw_circle(mark, 1.0, texture_color)
 		else:
-			canvas.draw_line(mark, mark + Vector2(4.0 + float(i % 2) * 3.0, -1.0), texture_color, 0.8, true)
+			canvas.draw_line(mark, mark + Vector2(4.0 + float(i % 2) * 3.0, -1.0), texture_color, -1.0, false)
 
 
 func _draw_tile_vegetation(canvas: CanvasItem, center: Vector2, terrain: String, x: int, y: int, variation: float) -> void:
@@ -878,9 +878,9 @@ func _vegetation_point(center: Vector2, x: int, y: int, index: int, count: int) 
 
 func _draw_acacia(canvas: CanvasItem, point: Vector2, scale: float, foliage: Color) -> void:
 	draw_ellipse_shadow(canvas, point + Vector2(2, 4), Vector2(15, 3) * scale)
-	canvas.draw_line(point + Vector2(0, 5) * scale, point + Vector2(1, -11) * scale, Color("#665035"), 2.2 * scale, true)
-	canvas.draw_line(point + Vector2(1, -6) * scale, point + Vector2(-9, -13) * scale, Color("#665035"), 1.4 * scale, true)
-	canvas.draw_line(point + Vector2(1, -7) * scale, point + Vector2(10, -14) * scale, Color("#59462f"), 1.4 * scale, true)
+	canvas.draw_line(point + Vector2(0, 5) * scale, point + Vector2(1, -11) * scale, Color("#665035"), 2.2 * scale, false)
+	canvas.draw_line(point + Vector2(1, -6) * scale, point + Vector2(-9, -13) * scale, Color("#665035"), 1.4 * scale, false)
+	canvas.draw_line(point + Vector2(1, -7) * scale, point + Vector2(10, -14) * scale, Color("#59462f"), 1.4 * scale, false)
 	canvas.draw_colored_polygon(PackedVector2Array([
 		point + Vector2(-17, -12) * scale, point + Vector2(-12, -18) * scale,
 		point + Vector2(-2, -19) * scale, point + Vector2(4, -22) * scale,
@@ -910,14 +910,14 @@ func _draw_leaf_texture(canvas: CanvasItem, center: Vector2, radii: Vector2, fol
 		segments.append(leaf + stroke)
 		var color := foliage.lerp(Color("#c2c77a"), shade + 0.12) if shade >= 0.0 else foliage.darkened(-shade)
 		colors.append(color)
-	canvas.draw_multiline_colors(segments, colors, 1.0, true)
+	canvas.draw_multiline_colors(segments, colors, -1.0, false)
 
 
 func _draw_shrub(canvas: CanvasItem, point: Vector2, scale: float, foliage: Color) -> void:
 	draw_ellipse_shadow(canvas, point + Vector2(1, 2), Vector2(8, 2) * scale)
 	for branch in range(3):
 		var offset := float(branch - 1) * 3.0
-		canvas.draw_line(point + Vector2(offset, 2) * scale, point + Vector2(offset * 1.6, -7 - branch % 2) * scale, Color("#65553b"), 1.0, true)
+		canvas.draw_line(point + Vector2(offset, 2) * scale, point + Vector2(offset * 1.6, -7 - branch % 2) * scale, Color("#65553b"), -1.0, false)
 	canvas.draw_circle(point + Vector2(-5, -5) * scale, 4.5 * scale, foliage.darkened(0.08))
 	canvas.draw_circle(point + Vector2(1, -7) * scale, 5.0 * scale, foliage)
 	canvas.draw_circle(point + Vector2(6, -4) * scale, 4.0 * scale, foliage.lightened(0.1))
@@ -928,25 +928,25 @@ func _draw_tall_grass(canvas: CanvasItem, point: Vector2, scale: float, color: C
 	for blade in range(5):
 		var root := point + Vector2(float(blade) * 2.0 - 4.0, float(blade % 2))
 		var lean := float(blade - 2) * 1.4
-		canvas.draw_line(root, root + Vector2(lean, (-7.0 - float(blade % 3)) * scale), color.lightened(float(blade) * 0.025), 0.9, true)
+		canvas.draw_line(root, root + Vector2(lean, (-7.0 - float(blade % 3)) * scale), color.lightened(float(blade) * 0.025), -1.0, false)
 
 
 func _draw_palm(canvas: CanvasItem, point: Vector2, scale: float) -> void:
 	draw_ellipse_shadow(canvas, point + Vector2(3, 4), Vector2(12, 3) * scale)
-	canvas.draw_line(point + Vector2(0, 5) * scale, point + Vector2(2, -17) * scale, Color("#7c6038"), 2.6 * scale, true)
-	canvas.draw_line(point + Vector2(1, -5) * scale, point + Vector2(3, -16) * scale, Color("#b08a50", 0.75), 0.9, true)
+	canvas.draw_line(point + Vector2(0, 5) * scale, point + Vector2(2, -17) * scale, Color("#7c6038"), 2.6 * scale, false)
+	canvas.draw_line(point + Vector2(1, -5) * scale, point + Vector2(3, -16) * scale, Color("#b08a50", 0.75), -1.0, false)
 	var crown := point + Vector2(2, -17) * scale
 	for direction in [Vector2(-14, -4), Vector2(-11, 3), Vector2(-4, -8), Vector2(7, -8), Vector2(14, -3), Vector2(11, 4)]:
 		var tip: Vector2 = crown + direction * scale
-		canvas.draw_line(crown, tip, Color("#4f7047"), 2.0 * scale, true)
+		canvas.draw_line(crown, tip, Color("#4f7047"), 2.0 * scale, false)
 		var axis := (tip - crown).normalized()
 		for leaflet in range(1, 6):
 			var fraction := float(leaflet) / 6.0
 			var stem := crown.lerp(tip, fraction)
 			var spread := sin(fraction * PI) * 3.2 * scale
 			var sweep := axis * spread * 0.58
-			canvas.draw_line(stem, stem + sweep + axis.orthogonal() * spread, Color("#8a9b60"), 0.8, true)
-			canvas.draw_line(stem, stem + sweep - axis.orthogonal() * spread, Color("#496a43"), 0.8, true)
+			canvas.draw_line(stem, stem + sweep + axis.orthogonal() * spread, Color("#8a9b60"), -1.0, false)
+			canvas.draw_line(stem, stem + sweep - axis.orthogonal() * spread, Color("#496a43"), -1.0, false)
 	canvas.draw_circle(crown + Vector2(-2, 2) * scale, 2.0 * scale, Color("#705436"))
 	canvas.draw_circle(crown + Vector2(2, 2) * scale, 2.0 * scale, Color("#705436"))
 

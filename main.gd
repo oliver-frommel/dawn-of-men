@@ -3,8 +3,10 @@ extends Node2D
 
 class LayerNode extends Node2D:
 	var draw_cb: Callable
+	var did_draw := false
 
 	func _draw() -> void:
+		did_draw = true
 		if draw_cb.is_valid():
 			draw_cb.call(self)
 
@@ -190,6 +192,7 @@ var hominin_models: Array[Node3D] = []
 var map_root: Node2D
 var map_chunks: Array[Dictionary] = []
 var chunk_bounds: Array[Rect2] = []
+var baking_chunks: Array[int] = []
 var dynamic_world_layer: LayerNode
 var overlay_layer: LayerNode
 var ui_refresh_timer := 0.0
@@ -232,6 +235,14 @@ func _ready() -> void:
 	queue_redraw()
 	_redraw_dynamic()
 	_check_band_encounters()
+	if not RenderingServer.frame_post_draw.is_connected(_cleanup_baked_canvases):
+		RenderingServer.frame_post_draw.connect(_cleanup_baked_canvases)
+
+
+func _exit_tree() -> void:
+	OS.low_processor_usage_mode = false
+	if RenderingServer.frame_post_draw.is_connected(_cleanup_baked_canvases):
+		RenderingServer.frame_post_draw.disconnect(_cleanup_baked_canvases)
 
 
 func _is_sim_paused() -> bool:
@@ -269,6 +280,7 @@ func _change_food(delta_amount: float) -> void:
 
 
 func _process(delta: float) -> void:
+	_cleanup_baked_canvases()
 	if toast_timer > 0:
 		toast_timer -= delta
 		if toast_timer <= 0 and is_instance_valid(toast_label):
@@ -1393,37 +1405,66 @@ func _build_map_layers() -> void:
 
 func _ensure_chunk_baked(idx: int) -> void:
 	var chunk: Dictionary = map_chunks[idx]
-	if chunk["baked"]:
-		if chunk["dirty"]:
-			chunk["dirty"] = false
-			var canvas: LayerNode = chunk["canvas"]
-			var vp: SubViewport = chunk["viewport"]
-			canvas.queue_redraw()
-			vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	if chunk["baked"] and not chunk["dirty"]:
 		return
 	var bounds: Rect2 = chunk["bounds"]
 	var padded := bounds.grow(float(CHUNK_PAD))
-	var vp := SubViewport.new()
-	vp.name = "ChunkVP_%d" % idx
-	vp.size = Vector2i(int(ceilf(padded.size.x)), int(ceilf(padded.size.y)))
-	vp.transparent_bg = false
-	vp.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
+	var vp: SubViewport = chunk["viewport"]
+	if vp == null:
+		vp = SubViewport.new()
+		vp.name = "ChunkVP_%d" % idx
+		vp.size = Vector2i(int(ceilf(padded.size.x)), int(ceilf(padded.size.y)))
+		vp.transparent_bg = false
+		vp.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
+		vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		vp.disable_3d = true
+		add_child(vp)
+		var sprite: Sprite2D = chunk["sprite"]
+		sprite.texture = vp.get_texture()
+		chunk["viewport"] = vp
+
+	var canvas: LayerNode = chunk["canvas"]
+	if not is_instance_valid(canvas):
+		canvas = LayerNode.new()
+		canvas.position = -padded.position
+		canvas.draw_cb = func(c: CanvasItem) -> void:
+			map_renderer.draw_baked_rect(c, padded, discovered_landmarks, turn % 2 == 1, depleted_tiles, wildfire_tiles)
+		vp.add_child(canvas)
+		chunk["canvas"] = canvas
+	else:
+		canvas.did_draw = false
+		canvas.queue_redraw()
+
 	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
-	vp.disable_3d = true
-	add_child(vp)
-
-	var canvas := LayerNode.new()
-	canvas.position = -padded.position
-	canvas.draw_cb = func(c: CanvasItem) -> void:
-		map_renderer.draw_baked_rect(c, padded, discovered_landmarks, turn % 2 == 1, depleted_tiles, wildfire_tiles)
-	vp.add_child(canvas)
-
-	var sprite: Sprite2D = chunk["sprite"]
-	sprite.texture = vp.get_texture()
-	chunk["viewport"] = vp
-	chunk["canvas"] = canvas
 	chunk["baked"] = true
 	chunk["dirty"] = false
+	if idx not in baking_chunks:
+		baking_chunks.append(idx)
+
+
+func _cleanup_baked_canvases() -> void:
+	if baking_chunks.is_empty():
+		return
+	var remaining: Array[int] = []
+	for idx in baking_chunks:
+		if idx < 0 or idx >= map_chunks.size():
+			continue
+		var chunk: Dictionary = map_chunks[idx]
+		var canvas: LayerNode = chunk["canvas"]
+		var vp: SubViewport = chunk["viewport"]
+		if not is_instance_valid(canvas):
+			chunk["canvas"] = null
+			if is_instance_valid(vp):
+				vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+			continue
+		if canvas.did_draw:
+			canvas.queue_free()
+			chunk["canvas"] = null
+			if is_instance_valid(vp):
+				vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		else:
+			remaining.append(idx)
+	baking_chunks = remaining
 
 
 func _mark_chunk_dirty(tile: Vector2i) -> void:
