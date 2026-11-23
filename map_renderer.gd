@@ -285,21 +285,24 @@ func _emit_terrain_details(mb: MeshBuilder2D, center: Vector2, terrain: String, 
 				center + Vector2(16, 5), center + Vector2(7, 13),
 				Color("#b59a64", 0.5)
 			)
-	_emit_tile_vegetation(mb, center, terrain, x, y, variation)
-	var detail := posmod(x * 37 + y * 19, 7)
+	_emit_tile_vegetation(mb, center, terrain, x, y, variation, is_dry_season)
+	var detail := posmod(x * 37 + y * 19, 9)
 	if terrain not in ["river", "lake"]:
-		if detail == 0:
-			_emit_flower(mb, center + Vector2(-20, 8), Color("#d9a867"))
+		if detail == 0 and not is_dry_season:
+			var flower_col := Color("#e2b35e") if (x + y) % 2 == 0 else Color("#d47e5c")
+			_emit_flower(mb, _scatter_point(center, x, y, 211), flower_col)
 		elif detail == 1 or detail == 4:
-			_emit_boulder(mb, center + Vector2(18, 7), 0.65 + variation * 0.4)
+			_emit_boulder(mb, _scatter_point(center, x, y, 217), 0.55 + variation * 0.65)
 		elif detail == 3:
-			_emit_grass(mb, center + Vector2(18, 7), Color("#857b4d", 0.8))
+			var g_col := Color("#a89052", 0.8) if is_dry_season else Color("#857b4d", 0.8)
+			_emit_grass(mb, _scatter_point(center, x, y, 223), g_col)
 		elif detail == 5:
 			var pc := Color("#756b47", 0.55)
-			mb.add_circle(center + Vector2(12, 6), 1.1, pc, 5)
-			mb.add_circle(center + Vector2(15, 8), 1.1, pc, 5)
-			mb.add_circle(center + Vector2(20, 4), 1.1, pc, 5)
-			mb.add_circle(center + Vector2(23, 6), 1.1, pc, 5)
+			var base_p := _scatter_point(center, x, y, 229)
+			mb.add_circle(base_p, 1.1, pc, 5)
+			mb.add_circle(base_p + Vector2(3, 2), 1.1, pc, 5)
+			mb.add_circle(base_p + Vector2(8, -2), 1.1, pc, 5)
+			mb.add_circle(base_p + Vector2(11, 0), 1.1, pc, 5)
 	if terrain == "lake" and detail == 0:
 		mb.add_circle(center + Vector2(-17, 7), 2.0, Color("#a8b879", 0.85), 6)
 
@@ -418,83 +421,325 @@ func _emit_volcanic_tile(mb: MeshBuilder2D, center: Vector2, x: int, y: int, var
 	mb.add_arc(rim, 4.5, PI, TAU, 8, Color("#bf6b4a", 0.85), 1.5)
 
 
-func _emit_tile_vegetation(mb: MeshBuilder2D, center: Vector2, terrain: String, x: int, y: int, variation: float) -> void:
+func _scatter_point(center: Vector2, x: int, y: int, salt: int) -> Vector2:
+	# Free organic scatter across the isometric diamond (slightly crossing tile borders so groves merge).
+	var u := world.tile_noise(x, y, salt) * 2.0 - 1.0
+	var v := world.tile_noise(x, y, salt + 37) * 2.0 - 1.0
+	var ox := (u - v) * (WorldMapScript.TILE_W * 0.27)
+	var oy := (u + v) * (WorldMapScript.TILE_H * 0.27)
+	return center + Vector2(ox, oy)
+
+
+func _tint_foliage(base: Color, x: int, y: int, salt: int, is_dry: bool, near_water: bool) -> Color:
+	var warm_r := world.tile_noise(x, y, salt + 11)
+	var shade_r := world.tile_noise(x, y, salt + 23)
+	var col := base
+	if near_water:
+		col = col.lerp(Color("#2f5c3f"), 0.28)
+	elif warm_r > 0.55:
+		col = col.lerp(Color("#7c8043"), (warm_r - 0.55) * 0.75)
+	elif warm_r < 0.35:
+		col = col.lerp(Color("#324d3b"), (0.35 - warm_r) * 0.65)
+	if is_dry:
+		var dry_mix := 0.14 if near_water else 0.34
+		col = col.lerp(Color("#9e8b4d"), dry_mix)
+	if shade_r > 0.5:
+		col = col.lightened((shade_r - 0.5) * 0.18)
+	else:
+		col = col.darkened((0.5 - shade_r) * 0.18)
+	return col
+
+
+func _varied_tree_scale(x: int, y: int, salt: int, min_s: float, max_s: float) -> float:
+	var r := world.tile_noise(x, y, salt)
+	# Skewed natural age curve: mix of small saplings, mature trees, and occasional towering emergent giants.
+	var shaped := r * r * 0.45 + r * 0.55
+	if world.tile_noise(x, y, salt + 59) > 0.86:
+		shaped = minf(1.25, shaped + 0.34)
+	return lerpf(min_s, max_s, shaped)
+
+
+func _emit_tile_vegetation(mb: MeshBuilder2D, center: Vector2, terrain: String, x: int, y: int, variation: float, is_dry_season: bool) -> void:
+	var tile := Vector2i(x, y)
+	var near_water := world.near_permanent_water(tile)
+	var patch := world.terrain_noise.get_noise_2d(float(x) * 0.62 + 17.0, float(y) * 0.62 - 13.0)
+	var micro := world.terrain_noise.get_noise_2d(float(x) * 1.15 - 29.0, float(y) * 1.15 + 7.0)
+	var grass_wet := Color("#9da456") if near_water else Color("#c2ab60")
+	var grass_dry := Color("#b29b58") if near_water else Color("#c9a767")
+	var grass_base := grass_dry if is_dry_season else grass_wet
+
 	match terrain:
 		"woodland":
-			for i in range(7):
-				var point := _vegetation_point(center, x, y, i, 7)
-				if i in [1, 4]:
-					_emit_shrub(mb, point + Vector2(0, 2), 0.65 + world.tile_noise(x, y, i + 90) * 0.35, Color("#52683f"))
-				elif i % 3 == 0:
-					_emit_acacia(mb, point, 0.72 + world.tile_noise(x, y, i + 80) * 0.28, Color("#3d593b"))
+			# Macro-scale groves alternating with sunlit grassy clearings.
+			if patch < -0.18 and not near_water:
+				# Open woodland glade: tall grass, 1-2 shrubs, maybe a single lone sapling or giant tree.
+				for i in range(4):
+					var gp := _scatter_point(center, x, y, 300 + i * 7)
+					_emit_tall_grass(mb, gp, 0.55 + world.tile_noise(x, y, i + 31) * 0.55, grass_base.darkened(0.08))
+				if variation > 0.42:
+					var sp := _scatter_point(center, x, y, 340)
+					_emit_shrub(mb, sp, 0.55 + variation * 0.55, _tint_foliage(Color("#546b40"), x, y, 341, is_dry_season, near_water))
+				if variation > 0.68:
+					var tp := _scatter_point(center, x, y, 351)
+					var ts := _varied_tree_scale(x, y, 353, 0.65, 1.55)
+					var lean := (world.tile_noise(x, y, 355) - 0.5) * 5.0
+					_emit_tree(mb, tp, ts, _tint_foliage(Color("#445f3e"), x, y, 357, is_dry_season, near_water), lean)
+				return
+			var count := 8 if (patch > 0.14 or near_water) else (6 if patch > -0.04 else 4)
+			var pts: Array[Vector2] = []
+			for i in range(count):
+				pts.append(_scatter_point(center, x, y, 400 + i * 11))
+			pts.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.y < b.y)
+			for i in range(count):
+				var point := pts[i]
+				var kind_r := world.tile_noise(x, y, 470 + i * 13)
+				var lean := (world.tile_noise(x, y, 520 + i * 7) - 0.5) * 5.5
+				if kind_r < 0.24:
+					var sh_col := _tint_foliage(Color("#52683f"), x, y, 560 + i, is_dry_season, near_water)
+					_emit_shrub(mb, point + Vector2(0, 2), 0.50 + world.tile_noise(x, y, i + 90) * 0.65, sh_col)
+				elif kind_r < 0.50:
+					var ac_scale := _varied_tree_scale(x, y, 600 + i * 5, 0.56, 1.38)
+					var ac_col := _tint_foliage(Color("#3f5c3b"), x, y, 640 + i, is_dry_season, near_water)
+					_emit_acacia(mb, point, ac_scale, ac_col, lean, ac_scale > 1.05)
+				elif kind_r > 0.94 and not near_water:
+					_emit_snag(mb, point, 0.72 + variation * 0.55, lean)
 				else:
-					_emit_tree(mb, point, world.tile_noise(x, y, i + 70))
+					var tr_scale := _varied_tree_scale(x, y, 680 + i * 5, 0.52, 1.52)
+					var tr_col := _tint_foliage(Color("#435d3e"), x, y, 720 + i, is_dry_season, near_water)
+					_emit_tree(mb, point, tr_scale, tr_col, lean)
+
 		"savanna":
-			for i in range(5):
-				var grass_point := _vegetation_point(center, x, y, i, 5)
-				_emit_tall_grass(mb, grass_point, 0.65 + world.tile_noise(x, y, i + 30) * 0.5, Color("#c5ad63"))
-			var grove := world.terrain_noise.get_noise_2d(x + 19, y - 11)
-			var tree_count := 2 if grove > 0.18 else int(grove > -0.04)
-			for i in range(tree_count):
-				_emit_acacia(mb, _vegetation_point(center, x, y, i + 6, tree_count + 7), 0.72 + world.tile_noise(x, y, i + 60) * 0.28, Color("#50663d"))
+			# Vary grass density from sparse golden flats to thick waving plains.
+			var grass_count := 6 if micro > 0.10 else (4 if micro > -0.14 else 2)
+			for i in range(grass_count):
+				var gp := _scatter_point(center, x, y, 100 + i * 9)
+				var g_col := grass_base.lightened((world.tile_noise(x, y, 140 + i) - 0.5) * 0.14)
+				_emit_tall_grass(mb, gp, 0.50 + world.tile_noise(x, y, i + 30) * 0.70, g_col)
+			# Iconic termite mounds on open savanna.
+			if variation > 0.87 and patch < 0.08:
+				_emit_termite_mound(mb, _scatter_point(center, x, y, 173), 0.72 + world.tile_noise(x, y, 175) * 0.55)
+			# Rare monumental baobab on drier open savanna.
+			elif variation > 0.92 and micro < 0.0:
+				var bp := _scatter_point(center, x, y, 181)
+				var b_scale := 0.92 + world.tile_noise(x, y, 183) * 0.48
+				_emit_baobab(mb, bp, b_scale, _tint_foliage(Color("#4f663c"), x, y, 185, is_dry_season, near_water), is_dry_season)
+			# Clustered acacia copses & scattered lone trees of widely varying size.
+			var tree_count := 3 if patch > 0.24 else (2 if patch > 0.09 else (1 if patch > -0.08 else 0))
+			if tree_count > 0:
+				var tpts: Array[Vector2] = []
+				for i in range(tree_count):
+					tpts.append(_scatter_point(center, x, y, 200 + i * 17))
+				tpts.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.y < b.y)
+				for i in range(tree_count):
+					var p := tpts[i]
+					var sc := _varied_tree_scale(x, y, 240 + i * 7, 0.52, 1.50)
+					var lean := (world.tile_noise(x, y, 260 + i * 9) - 0.5) * 6.0
+					var col := _tint_foliage(Color("#50663d"), x, y, 280 + i, is_dry_season, near_water)
+					if world.tile_noise(x, y, 290 + i) > 0.78:
+						_emit_tree(mb, p, sc * 0.92, col.darkened(0.06), lean)
+					else:
+						_emit_acacia(mb, p, sc, col, lean, sc > 1.02)
+			elif micro > 0.18:
+				_emit_shrub(mb, _scatter_point(center, x, y, 297), 0.55 + variation * 0.45, _tint_foliage(Color("#697343"), x, y, 299, is_dry_season, near_water))
+
 		"dryland":
-			for i in range(4):
-				var dry_point := _vegetation_point(center, x, y, i, 4)
-				if i % 2 == 0:
-					_emit_shrub(mb, dry_point, 0.55 + world.tile_noise(x, y, i + 20) * 0.35, Color("#766c43"))
+			var scrub_count := 4 if patch > 0.0 else 2
+			for i in range(scrub_count):
+				var dp := _scatter_point(center, x, y, 800 + i * 11)
+				var r := world.tile_noise(x, y, 830 + i * 7)
+				if r < 0.45:
+					_emit_shrub(mb, dp, 0.42 + r * 0.9, _tint_foliage(Color("#786d42"), x, y, 850 + i, is_dry_season, false))
 				else:
-					_emit_tall_grass(mb, dry_point, 0.65, Color("#8c7847"))
+					_emit_tall_grass(mb, dp, 0.45 + r * 0.4, Color("#a58852") if is_dry_season else Color("#8e7b49"))
+			# Distinct dryland landmarks: baobabs, candelabra euphorbias, termite mounds, dead snags, scrub acacias.
+			if variation > 0.91:
+				_emit_baobab(mb, _scatter_point(center, x, y, 861), 0.88 + world.tile_noise(x, y, 863) * 0.45, _tint_foliage(Color("#5b6b41"), x, y, 865, is_dry_season, false), is_dry_season)
+			elif variation > 0.76:
+				_emit_euphorbia(mb, _scatter_point(center, x, y, 871), 0.72 + world.tile_noise(x, y, 873) * 0.58)
+			elif variation > 0.62:
+				_emit_termite_mound(mb, _scatter_point(center, x, y, 881), 0.68 + world.tile_noise(x, y, 883) * 0.55)
+			elif variation > 0.50:
+				var lean := (world.tile_noise(x, y, 887) - 0.5) * 6.0
+				_emit_snag(mb, _scatter_point(center, x, y, 889), 0.68 + world.tile_noise(x, y, 891) * 0.52, lean)
+			elif patch > 0.12:
+				var sc := _varied_tree_scale(x, y, 895, 0.48, 0.92)
+				_emit_acacia(mb, _scatter_point(center, x, y, 897), sc, _tint_foliage(Color("#6b7042"), x, y, 899, is_dry_season, false), 2.2, false)
+
 		"wetland":
-			for i in range(3):
-				_emit_reeds(mb, _vegetation_point(center, x, y, i, 3))
-			if variation > 0.8:
-				_emit_palm(mb, center + Vector2(18, 7), 0.78 + variation * 0.2)
+			var reed_count := 4 if patch > 0.0 else 2
+			for i in range(reed_count):
+				var rp := _scatter_point(center, x, y, 900 + i * 13)
+				if i == 0 and micro > 0.05:
+					_emit_papyrus(mb, rp, 0.78 + world.tile_noise(x, y, 919 + i) * 0.45, is_dry_season)
+				else:
+					_emit_reeds(mb, rp)
+			if variation > 0.62:
+				var p_scale := 0.68 + world.tile_noise(x, y, 941) * 0.68
+				var p_lean := (world.tile_noise(x, y, 943) - 0.5) * 7.0
+				_emit_palm(mb, _scatter_point(center, x, y, 947), p_scale, p_lean)
+			elif variation < 0.28 and patch > -0.05:
+				# Lush riverside fig / fever tree
+				var t_scale := _varied_tree_scale(x, y, 953, 0.75, 1.42)
+				_emit_tree(mb, _scatter_point(center, x, y, 955), t_scale, _tint_foliage(Color("#396342"), x, y, 957, is_dry_season, true), (variation - 0.14) * 14.0)
+
 		"highland":
-			for i in range(3):
-				var high_point := _vegetation_point(center, x, y, i, 3)
-				_emit_shrub(mb, high_point, 0.48 + variation * 0.25, Color("#626a4d"))
+			var sh_count := 3 if patch > -0.05 else 1
+			for i in range(sh_count):
+				var hp := _scatter_point(center, x, y, 960 + i * 9)
+				_emit_shrub(mb, hp, 0.40 + world.tile_noise(x, y, 971 + i) * 0.48, _tint_foliage(Color("#626a4d"), x, y, 975 + i, is_dry_season, near_water))
+			if variation > 0.74:
+				# Stunted windswept ridge acacia or euphorbia
+				var rp := _scatter_point(center, x, y, 981)
+				if micro > 0.0:
+					_emit_acacia(mb, rp, 0.48 + (variation - 0.74) * 1.4, _tint_foliage(Color("#546244"), x, y, 983, is_dry_season, false), 3.0, false)
+				else:
+					_emit_euphorbia(mb, rp, 0.62 + (variation - 0.74) * 1.3)
+
 		"volcanic":
-			if variation > 0.45:
-				_emit_shrub(mb, center + Vector2(-24, 9), 0.55, Color("#766a48"))
+			if variation > 0.55:
+				_emit_shrub(mb, _scatter_point(center, x, y, 991), 0.45 + variation * 0.3, _tint_foliage(Color("#766a48"), x, y, 993, is_dry_season, false))
+			elif variation < 0.22:
+				_emit_snag(mb, _scatter_point(center, x, y, 995), 0.65 + variation * 1.2, 2.4)
 
 
-func _emit_tree(mb: MeshBuilder2D, point: Vector2, size: float) -> void:
-	var scale := 0.68 + size * 0.38
-	mb.add_ellipse(point + Vector2(1, 5), Vector2(12, 3) * scale, Color(0, 0, 0, 0.22), 6)
-	mb.add_line(point + Vector2(0, 7 * scale), point + Vector2(0, -8 * scale), Color("#68563a"), 2.2 * scale)
-	mb.add_line(point + Vector2(0, -5 * scale), point + Vector2(-7, -11) * scale, Color("#735f3e"), 1.4 * scale)
-	mb.add_line(point + Vector2(1, -7 * scale), point + Vector2(8, -12) * scale, Color("#594a34"), 1.2 * scale)
+func _emit_tree(mb: MeshBuilder2D, point: Vector2, scale: float, foliage := Color("#435d3e"), lean := 0.0) -> void:
+	var crown_shift := Vector2(lean * scale, 0.0)
+	mb.add_ellipse(point + Vector2(1.0 + lean * 0.3, 5.0), Vector2(12.0, 3.2) * scale, Color(0, 0, 0, 0.22), 6)
+	mb.add_line(point + Vector2(0, 7 * scale), point + Vector2(0, -8 * scale) + crown_shift * 0.7, Color("#68563a"), 2.3 * scale)
+	mb.add_line(point + Vector2(0, -5 * scale) + crown_shift * 0.5, point + Vector2(-7, -11) * scale + crown_shift, Color("#735f3e"), 1.4 * scale)
+	mb.add_line(point + Vector2(1, -7 * scale) + crown_shift * 0.6, point + Vector2(8, -12) * scale + crown_shift, Color("#594a34"), 1.2 * scale)
+	var cp := point + crown_shift
 	mb.add_poly_solid(PackedVector2Array([
-		point + Vector2(-12 * scale, -5 * scale), point + Vector2(-8 * scale, -13 * scale),
-		point + Vector2(-2 * scale, -12 * scale), point + Vector2(3 * scale, -17 * scale),
-		point + Vector2(12 * scale, -11 * scale), point + Vector2(10 * scale, -4 * scale),
-		point + Vector2(3 * scale, -2 * scale), point + Vector2(-5 * scale, -3 * scale)
-	]), Color("#435d3e").lightened(size * 0.12))
-	mb.add_circle(point + Vector2(-5 * scale, -9 * scale), 5.0 * scale, Color("#435d3e").darkened(0.08), 6)
-	mb.add_circle(point + Vector2(3 * scale, -10 * scale), 6.0 * scale, Color("#435d3e").lightened(0.12), 6)
-	mb.add_circle(point + Vector2(0, -14 * scale), 4.0 * scale, Color("#526c46").lightened(size * 0.12), 6)
-	_emit_leaf_texture(mb, point + Vector2(-5, -10) * scale, Vector2(5.5, 3.3) * scale, Color("#56704a"), 4)
-	_emit_leaf_texture(mb, point + Vector2(4, -10) * scale, Vector2(6.5, 4.5) * scale, Color("#607950"), 4)
-	_emit_leaf_texture(mb, point + Vector2(1, -14) * scale, Vector2(4.0, 3.2) * scale, Color("#6c8051"), 3)
-
-
-func _emit_acacia(mb: MeshBuilder2D, point: Vector2, scale: float, foliage: Color) -> void:
-	mb.add_ellipse(point + Vector2(2, 4), Vector2(15, 3) * scale, Color(0, 0, 0, 0.22), 6)
-	mb.add_line(point + Vector2(0, 5) * scale, point + Vector2(1, -11) * scale, Color("#665035"), 2.2 * scale)
-	mb.add_line(point + Vector2(1, -6) * scale, point + Vector2(-9, -13) * scale, Color("#665035"), 1.4 * scale)
-	mb.add_line(point + Vector2(1, -7) * scale, point + Vector2(10, -14) * scale, Color("#59462f"), 1.4 * scale)
-	mb.add_poly_solid(PackedVector2Array([
-		point + Vector2(-17, -12) * scale, point + Vector2(-12, -18) * scale,
-		point + Vector2(-2, -19) * scale, point + Vector2(4, -22) * scale,
-		point + Vector2(15, -18) * scale, point + Vector2(19, -12) * scale,
-		point + Vector2(10, -9) * scale, point + Vector2(-10, -9) * scale
+		cp + Vector2(-12 * scale, -5 * scale), cp + Vector2(-8 * scale, -13 * scale),
+		cp + Vector2(-2 * scale, -12 * scale), cp + Vector2(3 * scale, -17 * scale),
+		cp + Vector2(12 * scale, -11 * scale), cp + Vector2(10 * scale, -4 * scale),
+		cp + Vector2(3 * scale, -2 * scale), cp + Vector2(-5 * scale, -3 * scale)
 	]), foliage)
-	mb.add_circle(point + Vector2(-8, -15) * scale, 5.2 * scale, foliage.darkened(0.08), 6)
-	mb.add_circle(point + Vector2(5, -16) * scale, 6.0 * scale, foliage.lightened(0.09), 6)
-	_emit_leaf_texture(mb, point + Vector2(-10, -13) * scale, Vector2(6.0, 3.5) * scale, foliage, 3)
-	_emit_leaf_texture(mb, point + Vector2(-1, -16) * scale, Vector2(7.0, 3.1) * scale, foliage.lightened(0.07), 4)
-	_emit_leaf_texture(mb, point + Vector2(8, -17) * scale, Vector2(6.5, 3.5) * scale, foliage.lightened(0.13), 4)
-	_emit_leaf_texture(mb, point + Vector2(11, -12) * scale, Vector2(5.5, 2.1) * scale, foliage.darkened(0.07), 3)
+	mb.add_circle(cp + Vector2(-5 * scale, -9 * scale), 5.0 * scale, foliage.darkened(0.09), 6)
+	mb.add_circle(cp + Vector2(3 * scale, -10 * scale), 6.0 * scale, foliage.lightened(0.11), 6)
+	mb.add_circle(cp + Vector2(0, -14 * scale), 4.2 * scale, foliage.lightened(0.16), 6)
+	_emit_leaf_texture(mb, cp + Vector2(-5, -10) * scale, Vector2(5.5, 3.3) * scale, foliage.lightened(0.05), 4)
+	_emit_leaf_texture(mb, cp + Vector2(4, -10) * scale, Vector2(6.5, 4.5) * scale, foliage.lightened(0.12), 4)
+	_emit_leaf_texture(mb, cp + Vector2(1, -14) * scale, Vector2(4.0, 3.2) * scale, foliage.lightened(0.18), 3)
+
+
+func _emit_acacia(mb: MeshBuilder2D, point: Vector2, scale: float, foliage: Color, lean := 0.0, tiered := false) -> void:
+	var crown_shift := Vector2(lean * scale, 0.0)
+	var cp := point + crown_shift
+	mb.add_ellipse(point + Vector2(2.0 + lean * 0.35, 4.0), Vector2(15.0, 3.2) * scale, Color(0, 0, 0, 0.22), 6)
+	mb.add_line(point + Vector2(0, 5) * scale, cp + Vector2(1, -11) * scale, Color("#665035"), 2.2 * scale)
+	mb.add_line(point.lerp(cp, 0.55) + Vector2(1, -6) * scale, cp + Vector2(-9, -13) * scale, Color("#665035"), 1.4 * scale)
+	mb.add_line(point.lerp(cp, 0.65) + Vector2(1, -7) * scale, cp + Vector2(10, -14) * scale, Color("#59462f"), 1.4 * scale)
+	mb.add_poly_solid(PackedVector2Array([
+		cp + Vector2(-17, -12) * scale, cp + Vector2(-12, -18) * scale,
+		cp + Vector2(-2, -19) * scale, cp + Vector2(4, -22) * scale,
+		cp + Vector2(15, -18) * scale, cp + Vector2(19, -12) * scale,
+		cp + Vector2(10, -9) * scale, cp + Vector2(-10, -9) * scale
+	]), foliage)
+	mb.add_circle(cp + Vector2(-8, -15) * scale, 5.2 * scale, foliage.darkened(0.08), 6)
+	mb.add_circle(cp + Vector2(5, -16) * scale, 6.0 * scale, foliage.lightened(0.09), 6)
+	_emit_leaf_texture(mb, cp + Vector2(-10, -13) * scale, Vector2(6.0, 3.5) * scale, foliage, 3)
+	_emit_leaf_texture(mb, cp + Vector2(-1, -16) * scale, Vector2(7.0, 3.1) * scale, foliage.lightened(0.07), 4)
+	_emit_leaf_texture(mb, cp + Vector2(8, -17) * scale, Vector2(6.5, 3.5) * scale, foliage.lightened(0.13), 4)
+	if tiered:
+		# Classic East African double-tiered umbrella acacia crown.
+		var upper := cp + Vector2(-2.0, -7.5) * scale
+		mb.add_line(cp + Vector2(0, -13) * scale, upper + Vector2(0, -11) * scale, Color("#5f4b32"), 1.3 * scale)
+		mb.add_poly_solid(PackedVector2Array([
+			upper + Vector2(-11, -13) * scale, upper + Vector2(-6, -17) * scale,
+			upper + Vector2(6, -17) * scale, upper + Vector2(12, -13) * scale,
+			upper + Vector2(6, -10) * scale, upper + Vector2(-6, -10) * scale
+		]), foliage.lightened(0.12))
+		_emit_leaf_texture(mb, upper + Vector2(0, -14) * scale, Vector2(7.0, 2.4) * scale, foliage.lightened(0.18), 3)
+
+
+func _emit_baobab(mb: MeshBuilder2D, point: Vector2, scale: float, foliage: Color, is_dry: bool) -> void:
+	# Monumental bottle-shaped pale trunk with gnarled upward-reaching limbs.
+	mb.add_ellipse(point + Vector2(2, 5), Vector2(18, 4.5) * scale, Color(0, 0, 0, 0.25), 7)
+	var bark := Color("#8b7a68")
+	var bark_lit := Color("#a89782")
+	var bark_shade := Color("#645749")
+	mb.add_poly_solid(PackedVector2Array([
+		point + Vector2(-6.5, 5) * scale, point + Vector2(-5.5, -5) * scale,
+		point + Vector2(-3.8, -14) * scale, point + Vector2(3.8, -14) * scale,
+		point + Vector2(5.8, -5) * scale, point + Vector2(6.8, 5) * scale
+	]), bark)
+	mb.add_line(point + Vector2(-3.2, 4) * scale, point + Vector2(-2.2, -13) * scale, bark_lit, 2.0 * scale)
+	mb.add_line(point + Vector2(3.6, 4) * scale, point + Vector2(2.6, -13) * scale, bark_shade, 1.8 * scale)
+	var branches := [
+		[Vector2(-3, -13), Vector2(-12, -20), Vector2(-16, -24)],
+		[Vector2(-1, -14), Vector2(-5, -23), Vector2(-7, -27)],
+		[Vector2(1, -14), Vector2(5, -22), Vector2(8, -26)],
+		[Vector2(3, -13), Vector2(12, -19), Vector2(17, -22)]
+	]
+	for b in branches:
+		var p0: Vector2 = point + (b[0] as Vector2) * scale
+		var p1: Vector2 = point + (b[1] as Vector2) * scale
+		var p2: Vector2 = point + (b[2] as Vector2) * scale
+		mb.add_line(p0, p1, bark, 2.2 * scale)
+		mb.add_line(p1, p2, bark_shade, 1.3 * scale)
+		if not is_dry:
+			mb.add_circle(p2, 3.8 * scale, foliage, 5)
+			mb.add_circle(p2 + Vector2(-1.5, -1.5) * scale, 2.5 * scale, foliage.lightened(0.14), 5)
+		else:
+			mb.add_circle(p2, 2.2 * scale, foliage.lerp(Color("#9e8d58"), 0.5), 5)
+
+
+func _emit_euphorbia(mb: MeshBuilder2D, point: Vector2, scale: float) -> void:
+	# East African candelabra succulent silhouette.
+	mb.add_ellipse(point + Vector2(1, 3), Vector2(7, 2.2) * scale, Color(0, 0, 0, 0.22), 6)
+	var green := Color("#4f6b47")
+	var lit := Color("#6d8759")
+	mb.add_line(point + Vector2(0, 4) * scale, point + Vector2(0, -14) * scale, green, 2.6 * scale)
+	mb.add_line(point + Vector2(-0.6, 2) * scale, point + Vector2(-0.6, -13) * scale, lit, 1.0 * scale)
+	for side in [-1.0, 1.0]:
+		var elbow := point + Vector2(side * 5.2, -5.5) * scale
+		var tip := point + Vector2(side * 5.6, -13.0) * scale
+		mb.add_line(point + Vector2(0, -4.5) * scale, elbow, green, 2.0 * scale)
+		mb.add_line(elbow, tip, green, 2.0 * scale)
+		mb.add_line(elbow + Vector2(-0.4, 0) * scale, tip + Vector2(-0.4, 0) * scale, lit, 0.8 * scale)
+	var high_elbow := point + Vector2(-3.4, -9.5) * scale
+	mb.add_line(point + Vector2(0, -9.0) * scale, high_elbow, green, 1.6 * scale)
+	mb.add_line(high_elbow, high_elbow + Vector2(0, -4.5) * scale, lit, 1.5 * scale)
+
+
+func _emit_termite_mound(mb: MeshBuilder2D, point: Vector2, scale: float) -> void:
+	mb.add_ellipse(point + Vector2(2, 3), Vector2(9, 2.8) * scale, Color(0, 0, 0, 0.22), 6)
+	var lit := Color("#b9784c")
+	var mid := Color("#965b39")
+	var shade := Color("#663d28")
+	mb.add_poly_solid(PackedVector2Array([
+		point + Vector2(-6.5, 3) * scale, point + Vector2(-4.2, -5) * scale,
+		point + Vector2(-1.5, -13) * scale, point + Vector2(0.8, -14.5) * scale,
+		point + Vector2(3.2, -6) * scale, point + Vector2(6.8, 3) * scale
+	]), mid)
+	mb.add_tri(point + Vector2(-5.2, 2.5) * scale, point + Vector2(-1.2, -13) * scale, point + Vector2(0.0, 2.5) * scale, lit, lit, mid)
+	mb.add_tri(point + Vector2(0.5, -14) * scale, point + Vector2(3.0, -5.5) * scale, point + Vector2(6.2, 2.8) * scale, mid, shade, shade)
+	# Secondary side turret
+	mb.add_tri(point + Vector2(2.0, 2.5) * scale, point + Vector2(4.6, -7.5) * scale, point + Vector2(7.0, 2.5) * scale, mid, lit, shade)
+
+
+func _emit_snag(mb: MeshBuilder2D, point: Vector2, scale: float, lean := 0.0) -> void:
+	mb.add_ellipse(point + Vector2(2, 3), Vector2(8, 2.2) * scale, Color(0, 0, 0, 0.18), 5)
+	var wood := Color("#9c907c")
+	var dark := Color("#6d6456")
+	var top := point + Vector2(lean * 0.8, -12.0) * scale
+	mb.add_line(point + Vector2(0, 4) * scale, top, wood, 2.0 * scale)
+	mb.add_line(point.lerp(top, 0.55), top + Vector2(-6.5, -4.5) * scale, wood, 1.2 * scale)
+	mb.add_line(point.lerp(top, 0.72), top + Vector2(5.5, -5.0) * scale, dark, 1.1 * scale)
+	mb.add_line(top, top + Vector2(-2.0, -4.0) * scale, wood.lightened(0.12), 0.9 * scale)
+
+
+func _emit_papyrus(mb: MeshBuilder2D, point: Vector2, scale: float, is_dry: bool) -> void:
+	var stem := Color("#6d874d") if not is_dry else Color("#8a8d52")
+	var head := Color("#9db266") if not is_dry else Color("#b5a764")
+	for i in range(4):
+		var spread := (float(i) - 1.5) * 3.8 * scale
+		var h := (-11.0 - float(i % 2) * 3.5) * scale
+		var tip := point + Vector2(spread, h)
+		mb.add_line(point + Vector2(spread * 0.25, 2), tip, stem, 1.2)
+		mb.add_circle(tip, 2.6 * scale, head, 5)
+		mb.add_circle(tip + Vector2(-0.6, -0.8) * scale, 1.4 * scale, head.lightened(0.18), 5)
 
 
 func _emit_leaf_texture(mb: MeshBuilder2D, center: Vector2, radii: Vector2, foliage: Color, count: int) -> void:
@@ -560,11 +805,11 @@ func _emit_reeds(mb: MeshBuilder2D, point: Vector2) -> void:
 	mb.add_circle(point + Vector2(-3, -10), 1.0, Color("#796746"), 5)
 
 
-func _emit_palm(mb: MeshBuilder2D, point: Vector2, scale: float) -> void:
-	mb.add_ellipse(point + Vector2(3, 4), Vector2(12, 3) * scale, Color(0, 0, 0, 0.22), 8)
-	mb.add_line(point + Vector2(0, 5) * scale, point + Vector2(2, -17) * scale, Color("#7c6038"), 2.6 * scale)
-	mb.add_line(point + Vector2(1, -5) * scale, point + Vector2(3, -16) * scale, Color("#b08a50", 0.75), 0.9)
-	var crown := point + Vector2(2, -17) * scale
+func _emit_palm(mb: MeshBuilder2D, point: Vector2, scale: float, lean := 2.0) -> void:
+	mb.add_ellipse(point + Vector2(3, 4), Vector2(12, 3) * scale, Color(0, 0, 0, 0.22), 7)
+	var crown := point + Vector2(lean, -17) * scale
+	mb.add_line(point + Vector2(0, 5) * scale, crown, Color("#7c6038"), 2.6 * scale)
+	mb.add_line(point.lerp(crown, 0.42) + Vector2(0.5, 0), crown + Vector2(0.5, 1.0) * scale, Color("#b08a50", 0.75), 0.9)
 	for direction in [Vector2(-14, -4), Vector2(-11, 3), Vector2(-4, -8), Vector2(7, -8), Vector2(14, -3), Vector2(11, 4)]:
 		var tip: Vector2 = crown + direction * scale
 		mb.add_line(crown, tip, Color("#4f7047"), 2.0 * scale)
