@@ -59,7 +59,16 @@ const TASK_MATE_DURATION := 2.6
 const TASK_KINSHIP_DURATION := 3.0
 const WET_WATERHOLE_FORAGE := 18
 const PREDATOR_DANGER_RANGE := 50.0
+const PREDATOR_STALK_RANGE := 155.0
+const PREDATOR_STALK_SPEED := 36.0
 const PREDATOR_COOLDOWN_SECS := 8.0
+const PREDATOR_RESPAWN_SEASONS := 3
+const BAND_PURSUE_RANGE := 160.0
+const BAND_PURSUE_SPEED := 46.0
+const BAND_SKIRMISH_RANGE := 54.0
+const BAND_SKIRMISH_COOLDOWN := 18.0
+const WOUNDED_SPEED_PENALTY := 10.0
+const TASK_FIGHT_DURATION := 1.8
 const PICKUP_RANGE := 34.0
 const MAX_COLLECTIBLES := 64
 const HUNT_RANGE := 86.0
@@ -126,6 +135,11 @@ var collectibles: Dictionary = {}
 var pack: Dictionary = {"stone": 0, "gourd": 0, "tinder": 0}
 var items_collected := 0
 var floating_texts: Array[Dictionary] = []
+var combat_flashes: Array[Dictionary] = []
+var wounded_seasons := 0
+var clashes_won := 0
+var clashes_lost := 0
+var predators_slain := 0
 var carried_ember_seasons := 0
 var wildlife_sighted: Dictionary = {}
 var band_share_ready_turn: Dictionary = {}
@@ -237,6 +251,8 @@ func _player_speed() -> float:
 		speed += ERECTUS_SPEED_BONUS
 	if adult_age >= AGING_RANGE_PENALTY_AGE:
 		speed = maxf(44.0, speed - AGING_SPEED_PENALTY)
+	if wounded_seasons > 0:
+		speed = maxf(38.0, speed - WOUNDED_SPEED_PENALTY)
 	return speed
 
 
@@ -257,13 +273,14 @@ func _process(delta: float) -> void:
 		if toast_timer <= 0 and is_instance_valid(toast_label):
 			toast_label.hide()
 	var texts_changed := _update_floating_texts(delta)
+	var flashes_changed := _update_combat_flashes(delta)
 	var sim_paused := _is_sim_paused()
 	for animal in wildlife:
 		var model: Node = animal["model"]
 		if is_instance_valid(model):
 			model.set_process(not sim_paused)
 	if sim_paused:
-		if texts_changed:
+		if texts_changed or flashes_changed:
 			_redraw_dynamic()
 		return
 	var sim_delta := delta * time_scale
@@ -291,6 +308,7 @@ func _process(delta: float) -> void:
 			if MAP_VIEW.grow(70.0 * zoom_level).has_point(_world_to_screen(band["position"])):
 				bands_need_redraw = true
 	_check_band_encounters()
+	_check_band_skirmishes()
 	_sync_hominin_models(sim_delta)
 	var wildlife_changed := _update_wildlife(sim_delta)
 	_check_predator_encounters()
@@ -301,7 +319,7 @@ func _process(delta: float) -> void:
 	if picked_up or ((moved or bands_moved or wildlife_changed) and ui_refresh_timer >= 0.20):
 		ui_refresh_timer = 0.0
 		_refresh_action_label()
-	if wildlife_changed or moved or bands_need_redraw or task_changed or texts_changed or picked_up:
+	if wildlife_changed or moved or bands_need_redraw or task_changed or texts_changed or flashes_changed or picked_up:
 		_redraw_dynamic()
 	var action_time := float(player_actor.get("action_time", 0.0))
 	if action_time > 0.0 and active_task.is_empty():
@@ -422,6 +440,10 @@ func _make_ai_band(label: String, start: Vector2i, goals: Array, color: Color, p
 	actor["pause"] = pause
 	actor["speed"] = 39.0
 	actor["opacity"] = 1.0
+	actor["attitude"] = "friendly"
+	actor["skirmish_cooldown"] = 0.0
+	actor["pursuing"] = false
+	actor["repath_timer"] = 0.0
 	return actor
 
 
@@ -474,6 +496,20 @@ func _update_actor(actor: Dictionary, delta: float, speed: float) -> bool:
 
 
 func _update_ai_band(actor: Dictionary, delta: float) -> bool:
+	if float(actor.get("skirmish_cooldown", 0.0)) > 0.0:
+		actor["skirmish_cooldown"] = maxf(0.0, float(actor["skirmish_cooldown"]) - delta)
+	var player_pos: Vector2 = player_actor["position"]
+	var position: Vector2 = actor["position"]
+	var hostile: bool = str(actor.get("attitude", "friendly")) == "hostile" and float(actor.get("skirmish_cooldown", 0.0)) <= 0.0 and not _run_ended()
+	if hostile and position.distance_squared_to(player_pos) <= BAND_PURSUE_RANGE * BAND_PURSUE_RANGE:
+		actor["pursuing"] = true
+		actor["pause"] = 0.0
+		actor["repath_timer"] = float(actor.get("repath_timer", 0.0)) - delta
+		if float(actor["repath_timer"]) <= 0.0 or (position == actor["target"] and actor["route"].is_empty()):
+			actor["repath_timer"] = 0.75
+			_route_actor_to(actor, world.tile_from_world(player_pos))
+		return _update_actor(actor, delta, BAND_PURSUE_SPEED)
+	actor["pursuing"] = false
 	var goals: Array = actor["goals"]
 	if goals.is_empty():
 		return false
@@ -481,7 +517,6 @@ func _update_ai_band(actor: Dictionary, delta: float) -> bool:
 		actor["pause"] = maxf(0.0, float(actor["pause"]) - delta)
 		actor["moving"] = false
 		return false
-	var position: Vector2 = actor["position"]
 	var target: Vector2 = actor["target"]
 	if position == target:
 		actor["position"] = target
@@ -632,7 +667,7 @@ func _wildlife_roster() -> Array[Dictionary]:
 				{"species":"Hipparion", "at":home + Vector2(-82, -58), "phase":0.2},
 				{"species":"Sivatherium", "at":home + Vector2(80, -70), "phase":1.7},
 				{"species":"Deinotherium", "at":home + Vector2(42, 90), "phase":3.1},
-				{"species":"Dinofelis", "at":home + Vector2(-110, 25), "phase":4.3},
+				{"species":"Dinofelis", "at":home + Vector2(-155, 40), "phase":4.3},
 				{"species":"Hipparion", "at":central, "phase":1.1},
 				{"species":"Sivatherium", "at":eastern, "phase":2.8},
 				{"species":"Deinotherium", "at":southern, "phase":4.9}
@@ -642,7 +677,7 @@ func _wildlife_roster() -> Array[Dictionary]:
 				{"species":"Hipparion", "at":home + Vector2(-82, -58), "phase":0.6},
 				{"species":"Antelope", "at":home + Vector2(80, -70), "phase":2.0},
 				{"species":"Deinotherium", "at":home + Vector2(42, 90), "phase":3.7},
-				{"species":"Dinofelis", "at":home + Vector2(-110, 25), "phase":5.0},
+				{"species":"Dinofelis", "at":home + Vector2(-155, 40), "phase":5.0},
 				{"species":"Antelope", "at":central, "phase":1.4},
 				{"species":"Hipparion", "at":eastern, "phase":3.1},
 				{"species":"Dinofelis", "at":southern, "phase":4.2}
@@ -652,7 +687,7 @@ func _wildlife_roster() -> Array[Dictionary]:
 				{"species":"Zebra", "at":home + Vector2(-82, -58), "phase":0.2},
 				{"species":"Gazelle", "at":home + Vector2(80, -70), "phase":1.9},
 				{"species":"Elephant", "at":home + Vector2(42, 90), "phase":3.3},
-				{"species":"Lion", "at":home + Vector2(-110, 25), "phase":4.8},
+				{"species":"Lion", "at":home + Vector2(-155, 40), "phase":4.8},
 				{"species":"Zebra", "at":central, "phase":0.9},
 				{"species":"Gazelle", "at":eastern, "phase":2.4},
 				{"species":"Elephant", "at":southern, "phase":3.9}
@@ -662,7 +697,7 @@ func _wildlife_roster() -> Array[Dictionary]:
 				{"species":"Zebra", "at":home + Vector2(-82, -58), "phase":0.4},
 				{"species":"Wildebeest", "at":home + Vector2(80, -70), "phase":2.1},
 				{"species":"Elephant", "at":home + Vector2(42, 90), "phase":3.7},
-				{"species":"Lion", "at":home + Vector2(-110, 25), "phase":5.2},
+				{"species":"Lion", "at":home + Vector2(-155, 40), "phase":5.2},
 				{"species":"Wildebeest", "at":central, "phase":1.2},
 				{"species":"Zebra", "at":eastern, "phase":2.9},
 				{"species":"Lion", "at":southern, "phase":4.4}
@@ -672,7 +707,7 @@ func _wildlife_roster() -> Array[Dictionary]:
 				{"species":"Giraffe", "at":home + Vector2(-82, -58), "phase":0.4},
 				{"species":"Zebra", "at":home + Vector2(80, -70), "phase":2.1},
 				{"species":"Elephant", "at":home + Vector2(42, 90), "phase":3.7},
-				{"species":"Lion", "at":home + Vector2(-110, 25), "phase":5.2},
+				{"species":"Lion", "at":home + Vector2(-155, 40), "phase":5.2},
 				{"species":"Giraffe", "at":central, "phase":1.5},
 				{"species":"Zebra", "at":eastern, "phase":2.7},
 				{"species":"Elephant", "at":southern, "phase":4.1}
@@ -733,7 +768,10 @@ func _make_wildlife(entry: Dictionary) -> Dictionary:
 		"size": profile["size"], "species": species_name,
 		"is_predator": species_name in PREDATOR_SPECIES,
 		"is_prey": species_name in PREY_SPECIES,
-		"encounter_cooldown": 0.0,
+		"encounter_cooldown": 6.0 if species_name in PREDATOR_SPECIES else 0.0,
+		"stalking": false,
+		"slain_seasons": 0,
+		"repath_timer": 0.0,
 		"model": model, "opacity": 1.0, "replacement": {}
 	}
 
@@ -775,11 +813,28 @@ func _pick_wildlife_goal(animal: Dictionary) -> bool:
 
 
 func _update_wildlife_roaming(animal: Dictionary, delta: float) -> bool:
+	if int(animal.get("slain_seasons", 0)) > 0:
+		animal["stalking"] = false
+		animal["moving"] = false
+		return false
+	var position: Vector2 = animal["position"]
+	if animal.get("is_predator", false) and float(animal.get("encounter_cooldown", 0.0)) <= 0.0 and not _run_ended():
+		var player_pos: Vector2 = player_actor["position"]
+		if position.distance_squared_to(player_pos) <= PREDATOR_STALK_RANGE * PREDATOR_STALK_RANGE:
+			animal["stalking"] = true
+			animal["pause"] = 0.0
+			animal["repath_timer"] = float(animal.get("repath_timer", 0.0)) - delta
+			if float(animal["repath_timer"]) <= 0.0 or (position == animal["target"] and animal["route"].is_empty()):
+				animal["repath_timer"] = 0.65
+				_route_actor_to(animal, world.tile_from_world(player_pos))
+			var stalk_moved := _update_actor(animal, delta, PREDATOR_STALK_SPEED)
+			animal["at"] = animal["position"]
+			return stalk_moved
+	animal["stalking"] = false
 	if float(animal["pause"]) > 0.0:
 		animal["pause"] = maxf(0.0, float(animal["pause"]) - delta)
 		animal["moving"] = false
 		return false
-	var position: Vector2 = animal["position"]
 	var target: Vector2 = animal["target"]
 	if position == target and animal["route"].is_empty():
 		animal["moving"] = false
@@ -813,7 +868,7 @@ func _update_wildlife(delta: float) -> bool:
 			_position_wildlife_model(wildlife[i])
 			changed = true
 			continue
-		var target := 1.0 if replacement.is_empty() else 0.0
+		var target := 1.0 if replacement.is_empty() and int(animal.get("slain_seasons", 0)) <= 0 else 0.0
 		var next := move_toward(opacity, target, delta / 0.65) if on_screen else target
 		if next != opacity:
 			animal["opacity"] = next
@@ -830,12 +885,147 @@ func _update_wildlife(delta: float) -> bool:
 	return changed
 
 
+func _spawn_combat_flash(at: Vector2, color: Color) -> void:
+	combat_flashes.append({"at": at, "color": color, "age": 0.0, "duration": 0.65})
+
+
+func _update_combat_flashes(delta: float) -> bool:
+	if combat_flashes.is_empty():
+		return false
+	var keep: Array[Dictionary] = []
+	for flash in combat_flashes:
+		flash["age"] = float(flash["age"]) + delta
+		if float(flash["age"]) < float(flash["duration"]):
+			keep.append(flash)
+	combat_flashes = keep
+	return true
+
+
+func _player_combat_strength(include_flint := true) -> int:
+	var strength := 1
+	if _has_skill("stone_flaking"):
+		strength += 2
+	if _has_skill("hide_working"):
+		strength += 1
+	if _has_skill("ember_carrying") or carried_ember_seasons > 0:
+		strength += 1
+	if turn >= 25:
+		strength += 1
+	if include_flint and int(pack["stone"]) > 0:
+		strength += 1
+	if wounded_seasons > 0:
+		strength = maxi(1, strength - 1)
+	return strength
+
+
+func _band_combat_strength(band_index: int) -> int:
+	if _is_paranthropus_band(band_index) or turn >= 18:
+		return 4
+	return 3
+
+
+func _check_band_skirmishes() -> void:
+	if _run_ended():
+		return
+	var player_pos: Vector2 = player_actor["position"]
+	for i in range(ai_bands.size()):
+		var band: Dictionary = ai_bands[i]
+		if str(band.get("attitude", "friendly")) != "hostile":
+			continue
+		if float(band.get("skirmish_cooldown", 0.0)) > 0.0:
+			continue
+		var pos: Vector2 = band["position"]
+		if player_pos.distance_squared_to(pos) > BAND_SKIRMISH_RANGE * BAND_SKIRMISH_RANGE:
+			continue
+		if not world.land_segment_clear(player_pos, pos):
+			continue
+		_resolve_band_skirmish(i, false)
+		return
+
+
+func _resolve_band_skirmish(band_index: int, initiated_by_player: bool) -> void:
+	if band_index < 0 or band_index >= ai_bands.size():
+		return
+	var band: Dictionary = ai_bands[band_index]
+	var band_name: String = band["label"]
+	var player_pos: Vector2 = player_actor["position"]
+	var used_flint := int(pack["stone"]) > 0
+	var player_str := _player_combat_strength(true)
+	if used_flint:
+		pack["stone"] = int(pack["stone"]) - 1
+	var enemy_str := _band_combat_strength(band_index)
+	band["skirmish_cooldown"] = BAND_SKIRMISH_COOLDOWN
+	band["pursuing"] = false
+	band["pause"] = 0.0
+	if not band["goals"].is_empty():
+		var retreat_idx: int = (int(band["goal_index"]) + 2) % band["goals"].size()
+		band["goal_index"] = retreat_idx
+		_route_actor_to(band, band["goals"][retreat_idx])
+	movement_key = KEY_NONE
+	_cancel_active_task(true)
+	if player_str >= enemy_str:
+		clashes_won += 1
+		var loot := 14 if initiated_by_player else 10
+		var before_food := food
+		_change_food(float(loot))
+		var food_gain := food - before_food
+		var cohesion_gain := mini(4, 100 - cohesion)
+		var knowledge_gain := mini(3, 99 - knowledge)
+		cohesion += cohesion_gain
+		knowledge += knowledge_gain
+		band["attitude"] = "wary"
+		_spawn_combat_flash(player_pos.lerp(band["position"], 0.4), Color("#e8a84d"))
+		_spawn_floating_text("SKIRMISH WON · +%d Food" % food_gain, player_pos, Color("#f2c872"))
+		_start_player_activity("fighting", 1.2)
+		var flint_note := " (Flint used)" if used_flint else ""
+		_event("SKIRMISH WON  /  You drive back %s and seize stores%s. Food +%d, cohesion +%d, knowledge +%d." % [band_name, flint_note, food_gain, cohesion_gain, knowledge_gain])
+	else:
+		clashes_lost += 1
+		_change_food(-10.0)
+		cohesion = maxi(0, cohesion - 6)
+		band["attitude"] = "hostile"
+		var wounded_note := ""
+		if not _has_skill("hide_working"):
+			wounded_seasons = maxi(wounded_seasons, 2)
+			wounded_note = " Wounded!"
+		_spawn_combat_flash(player_pos, Color("#e04a3a"))
+		_spawn_floating_text("RAIDED · −10 Food%s" % wounded_note, player_pos, Color("#f07664"))
+		_event("TERRITORIAL RAID  /  %s overpower you in a sharp clash! Food −10, cohesion −6.%s" % [band_name, " You suffer a wound (slower travel)." if not wounded_note.is_empty() else " Hide wraps soften the blows."])
+		if cohesion == 0:
+			lineage_ended = true
+			player_actor["route"] = []
+			_event("LINEAGE LOST  /  Broken by territorial conflict, your band scatters across the valley.")
+			_show_summary_overlay()
+	_refresh_ui()
+	_redraw_dynamic()
+
+
+func _nearby_fightable_predator() -> Dictionary:
+	var armed := _has_skill("stone_flaking") or _has_skill("ember_carrying") or carried_ember_seasons > 0 or int(pack["stone"]) > 0 or turn >= 25
+	if not armed:
+		return {}
+	var player_pos: Vector2 = player_actor["position"]
+	var best: Dictionary = {}
+	var best_dist := HUNT_RANGE * HUNT_RANGE
+	for animal in wildlife:
+		if not animal.get("is_predator", false) or int(animal.get("slain_seasons", 0)) > 0:
+			continue
+		if float(animal["opacity"]) < 0.25:
+			continue
+		var pos: Vector2 = animal["at"]
+		var d2 := player_pos.distance_squared_to(pos)
+		if d2 <= best_dist and world.land_segment_clear(player_pos, pos):
+			best_dist = d2
+			best = animal
+	return best
+
+
 func _check_predator_encounters() -> void:
 	if _run_ended():
 		return
 	var player_pos: Vector2 = player_actor["position"]
 	for animal in wildlife:
-		if not animal.get("is_predator", false):
+		if not animal.get("is_predator", false) or int(animal.get("slain_seasons", 0)) > 0:
 			continue
 		if float(animal.get("encounter_cooldown", 0.0)) > 0.0 or float(animal["opacity"]) < 0.25:
 			continue
@@ -845,28 +1035,37 @@ func _check_predator_encounters() -> void:
 		if not world.land_segment_clear(player_pos, pos):
 			continue
 		animal["encounter_cooldown"] = PREDATOR_COOLDOWN_SECS
+		animal["stalking"] = false
 		animal["pause"] = 0.0
 		_pick_wildlife_goal(animal)
 		movement_key = KEY_NONE
 		var pred_name: String = animal["species"]
-		if _has_skill("ember_carrying"):
+		if _has_skill("ember_carrying") or carried_ember_seasons > 0:
 			cohesion = mini(100, cohesion + 2)
+			_spawn_combat_flash(pos, Color("#f0a24d"))
+			_spawn_floating_text("Embers repel %s!" % pred_name, player_pos, Color("#f2c872"))
 			_event("PREDATOR DETERRED  /  Glowing embers drive off a stalking %s. Cohesion +2." % pred_name)
 		elif _has_skill("stone_flaking"):
 			_change_food(-2.0)
 			cohesion = mini(100, cohesion + 1)
+			_spawn_combat_flash(pos, Color("#d4b67c"))
+			_spawn_floating_text("%s driven back" % pred_name, player_pos, Color("#e8d59b"))
 			_event("PREDATOR HELD OFF  /  Flaked stones and shouts keep a %s at bay. Food −2, cohesion +1." % pred_name)
 		elif int(pack["stone"]) > 0:
 			pack["stone"] = int(pack["stone"]) - 1
 			_change_food(-1.0)
 			cohesion = mini(100, cohesion + 1)
+			_spawn_combat_flash(pos, Color("#9dd2c4"))
 			_spawn_floating_text("Flint thrown! Predator repelled", player_pos, Color("#9dd2c4"))
 			_event("FLINT DEFENSE  /  You hurl a collected flint core to drive back a stalking %s. Food −1, cohesion +1." % pred_name)
 		else:
 			_cancel_active_task(true)
 			_change_food(-6.0)
-			cohesion = maxi(0, cohesion - 5)
-			_event("PREDATOR AMBUSH  /  A %s lunges from cover! You escape shaken. Food −6, cohesion −5." % pred_name)
+			cohesion = maxi(0, cohesion - 6)
+			wounded_seasons = maxi(wounded_seasons, 2)
+			_spawn_combat_flash(player_pos, Color("#e04a3a"))
+			_spawn_floating_text("MAULED · −6 Food · Wounded!", player_pos, Color("#f07664"))
+			_event("PREDATOR AMBUSH  /  A %s lunges from cover! You escape wounded. Food −6, cohesion −6." % pred_name)
 			if cohesion == 0:
 				lineage_ended = true
 				player_actor["route"] = []
@@ -1077,8 +1276,12 @@ func _check_collectible_pickups() -> bool:
 				var gain := food - before_food
 				if before_food < 45:
 					cohesion = mini(100, cohesion + 1)
-				_spawn_floating_text("+%d Food · Wild Figs" % gain, at, Color("#b6dc8b"))
-				_show_toast("Collected wild figs (food +%d)." % gain)
+				var heal_note := ""
+				if wounded_seasons > 0:
+					wounded_seasons = maxi(0, wounded_seasons - 1)
+					heal_note = " · Healing"
+				_spawn_floating_text("+%d Food · Wild Figs%s" % [gain, heal_note], at, Color("#b6dc8b"))
+				_show_toast("Collected wild figs (food +%d%s)." % [gain, ", eases wounds" if not heal_note.is_empty() else ""])
 			"stone":
 				pack["stone"] = int(pack["stone"]) + 1
 				var k_gain := mini(2, 99 - knowledge)
@@ -1271,6 +1474,7 @@ func _draw_overlay(canvas: CanvasItem) -> void:
 	map_renderer.draw_player_marker(canvas, MAP_VIEW, _world_to_screen, player_actor, ai_bands, task_progress)
 	canvas.draw_set_transform(Vector2.ZERO)
 	map_renderer.draw_band_markers(canvas, MAP_VIEW, zoom_level, _world_to_screen, ai_bands)
+	map_renderer.draw_combat_flashes(canvas, MAP_VIEW, _world_to_screen, combat_flashes)
 	map_renderer.draw_floating_texts(canvas, MAP_VIEW, _world_to_screen, floating_texts)
 	canvas.draw_string(ThemeDB.fallback_font, Vector2(18.0, 94.0), _wildlife_caption(), HORIZONTAL_ALIGNMENT_LEFT, 790.0, 12, Color("#f0dfb8"))
 	canvas.draw_string(ThemeDB.fallback_font, Vector2(18.0, 112.0), _pack_caption(), HORIZONTAL_ALIGNMENT_LEFT, 790.0, 11, Color("#c8d7c6"))
@@ -1428,6 +1632,8 @@ func _on_restart_chronicle() -> void:
 
 
 func _lineage_epithet() -> String:
+	if clashes_won + predators_slain >= 3:
+		return "Fierce Defenders of the Rift"
 	if _has_skill("ember_carrying") or _has_skill("hearth_keeping"):
 		return "Keepers of the Hearth"
 	var charted_pct := float(explored_tiles.size()) / float(WORLD_MAP_SCRIPT.WORLD_WIDTH * WORLD_MAP_SCRIPT.WORLD_HEIGHT)
@@ -1467,6 +1673,7 @@ func _show_summary_overlay() -> void:
 		+ "Final stores:  Food %d  ·  Knowledge %d  ·  Cohesion %d\n\n"
 		+ "Wildlife species sighted:  %d   ·   Items collected:  %d\n"
 		+ "Hunts completed:  %d   ·   Scavenges:  %d   ·   Shared camps:  %d\n"
+		+ "Skirmishes won / lost:  %d / %d   ·   Predators slain:  %d\n"
 		+ "Neanderthal kinship:  %s\n\n"
 		+ "Skills mastered (%d / %d):\n%s"
 	) % [
@@ -1476,6 +1683,7 @@ func _show_summary_overlay() -> void:
 		food, knowledge, cohesion,
 		wildlife_sighted.size(), items_collected,
 		hunts_completed, scavenges_completed, band_shares_completed,
+		clashes_won, clashes_lost, predators_slain,
 		"Recorded" if kinship_recorded else "Unrecorded",
 		learned_skills.size(), TECH_TREE_SCRIPT.SKILLS.size(), skills_text
 	]
@@ -1862,16 +2070,54 @@ func _complete_active_task() -> void:
 			var practice := "You practice skills by the hearth." if str(task["activity"]) == "learning_at_hearth" else "You practice skills."
 			var tinder_note := " (Tinder used)" if used_tinder else ""
 			_event("%s%s Food −%d, knowledge +%d." % [practice, tinder_note, cost, knowledge_gain])
+		"fight_predator":
+			var pred := _nearby_fightable_predator()
+			var species_name := str(extra.get("species", "predator"))
+			var used_flint := int(pack["stone"]) > 0
+			var player_str := _player_combat_strength(true)
+			if used_flint:
+				pack["stone"] = int(pack["stone"]) - 1
+			var strike_at: Vector2 = pred["at"] if not pred.is_empty() else player_actor["position"]
+			if player_str >= 3 and not pred.is_empty():
+				predators_slain += 1
+				pred["slain_seasons"] = PREDATOR_RESPAWN_SEASONS
+				pred["stalking"] = false
+				pred["opacity"] = 0.0
+				pred["model"].set_opacity(0.0)
+				var pred_tile: Vector2i = world.tile_from_world(pred["at"])
+				if world.has_land_route_point(pred_tile):
+					carcass_sites[world.tile_id(pred_tile)] = 3
+				var c_gain := mini(5, 100 - cohesion)
+				var k_gain := mini(4, 99 - knowledge)
+				cohesion += c_gain
+				knowledge += k_gain
+				_spawn_combat_flash(strike_at, Color("#e8a84d"))
+				_spawn_floating_text("%s SLAIN · Carcass left!" % species_name, strike_at, Color("#f2c872"))
+				_event("PREDATOR SLAIN  /  You bring down a stalking %s! Its carcass can be scavenged; cohesion +%d, knowledge +%d." % [species_name, c_gain, k_gain])
+			else:
+				if not pred.is_empty():
+					pred["encounter_cooldown"] = PREDATOR_COOLDOWN_SECS * 1.5
+					pred["stalking"] = false
+					pred["pause"] = 0.0
+					_pick_wildlife_goal(pred)
+				_change_food(-2.0)
+				var c_gain := mini(3, 100 - cohesion)
+				cohesion += c_gain
+				_spawn_combat_flash(strike_at, Color("#d4b67c"))
+				_spawn_floating_text("%s driven off!" % species_name, strike_at, Color("#e8d59b"))
+				_event("PREDATOR DRIVEN OFF  /  You clash fiercely and drive off a %s. Food −2, cohesion +%d." % [species_name, c_gain])
 		"share":
 			var band_index := int(extra.get("band_index", 0))
 			band_shares_completed += 1
 			band_share_ready_turn[band_index] = turn + SHARE_CAMP_COOLDOWN
+			if band_index >= 0 and band_index < ai_bands.size():
+				ai_bands[band_index]["attitude"] = "friendly"
 			var knowledge_gain := mini(6, 99 - knowledge)
 			var cohesion_gain := mini(4, 100 - cohesion)
 			knowledge += knowledge_gain
 			cohesion += cohesion_gain
 			var band_name: String = ai_bands[band_index]["label"] if band_index < ai_bands.size() else "Neighbors"
-			_event("SHARED CAMP  /  %s trade trails and stories. Food −%d, knowledge +%d, cohesion +%d. %s" % [band_name, SHARE_CAMP_FOOD_COST, knowledge_gain, cohesion_gain, _nearest_undiscovered_landmark_hint()])
+			_event("SHARED CAMP  /  %s trade trails and stories (now friendly). Food −%d, knowledge +%d, cohesion +%d. %s" % [band_name, SHARE_CAMP_FOOD_COST, knowledge_gain, cohesion_gain, _nearest_undiscovered_landmark_hint()])
 		"kinship":
 			kinship_recorded = true
 			var cohesion_gain := mini(6, 100 - cohesion)
@@ -1882,6 +2128,35 @@ func _complete_active_task() -> void:
 			_event("PAIRING  /  You form a pair with an adult from a neighboring band. Food −%d. Your offspring takes over in %d seasons." % [MATING_FOOD_COST, SUCCESSION_SEASONS])
 	_refresh_ui()
 	_redraw_dynamic()
+
+
+func _tick_band_attitudes_and_wounds(entering_dry: bool) -> void:
+	if wounded_seasons > 0:
+		var heal := 2 if food > 55 else 1
+		wounded_seasons = maxi(0, wounded_seasons - heal)
+		if wounded_seasons == 0:
+			_event("WOUNDS HEALED  /  Your injuries mend and your stride returns.")
+	for animal in wildlife:
+		if int(animal.get("slain_seasons", 0)) > 0:
+			animal["slain_seasons"] = int(animal["slain_seasons"]) - 1
+	var newly_hostile: Array[String] = []
+	for i in range(ai_bands.size()):
+		var band: Dictionary = ai_bands[i]
+		if entering_dry:
+			var recently_shared := int(band_share_ready_turn.get(i, 0)) > turn
+			if _is_paranthropus_band(i):
+				band["attitude"] = "hostile"
+				newly_hostile.append(str(band["label"]))
+			elif i < 2 and not recently_shared and ((turn + i) % 2 == 1):
+				band["attitude"] = "hostile"
+				newly_hostile.append(str(band["label"]))
+			elif str(band.get("attitude", "friendly")) == "friendly" and i < 2 and not recently_shared:
+				band["attitude"] = "wary"
+		else:
+			if str(band.get("attitude", "friendly")) == "hostile":
+				band["attitude"] = "wary"
+	if not newly_hostile.is_empty():
+		_event("TERRITORIAL TENSION  /  Dry-season scarcity turns %s hostile. Evade them or arm with flint and stone flaking." % ", ".join(newly_hostile))
 
 
 func _advance_season() -> void:
@@ -1903,6 +2178,7 @@ func _advance_season() -> void:
 	_tick_carcass_sites()
 	_tick_wildfires(entering_dry)
 	_replenish_collectibles(entering_dry, 5)
+	_tick_band_attitudes_and_wounds(entering_dry)
 	year_bp = max(0, year_bp - 100)
 	var low_food_penalty := LOW_FOOD_COHESION_PENALTY
 	if _has_skill("windbreaks") and (world.terrain_at(tile) == "highland" or tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE):
@@ -2049,6 +2325,10 @@ func _on_gather() -> void:
 		return
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
 	var tile_id: int = world.tile_id(tile)
+	var pred := _nearby_fightable_predator()
+	if not pred.is_empty():
+		_start_task("fight_predator", "fighting", TASK_FIGHT_DURATION, {"species": str(pred["species"])})
+		return
 	if carcass_sites.has(tile_id):
 		if _scavenge_food_gain(tile) == 0:
 			return
@@ -2119,15 +2399,27 @@ func _on_learn_skill(skill_id: String) -> void:
 	_redraw_dynamic()
 
 
+func _nearby_hostile_band() -> int:
+	var position: Vector2 = player_actor["position"]
+	for i in range(ai_bands.size()):
+		if str(ai_bands[i].get("attitude", "friendly")) != "hostile":
+			continue
+		if float(ai_bands[i].get("skirmish_cooldown", 0.0)) > 0.0:
+			continue
+		var band_position: Vector2 = ai_bands[i]["position"]
+		if position.distance_squared_to(band_position) <= MATE_RANGE * MATE_RANGE and world.land_segment_clear(position, band_position):
+			return i
+	return -1
+
+
 func _nearby_shareable_band() -> int:
 	var position: Vector2 = player_actor["position"]
 	for i in range(ai_bands.size()):
-		if _is_paranthropus_band(i):
+		if _is_paranthropus_band(i) or str(ai_bands[i].get("attitude", "friendly")) == "hostile":
 			continue
 		var band_position: Vector2 = ai_bands[i]["position"]
-		if position.distance_squared_to(band_position) <= MATE_RANGE * MATE_RANGE and _world_tile_visible(band_position):
-			if world.land_segment_clear(position, band_position):
-				return i
+		if position.distance_squared_to(band_position) <= MATE_RANGE * MATE_RANGE and world.land_segment_clear(position, band_position):
+			return i
 	return -1
 
 
@@ -2155,6 +2447,10 @@ func _nearest_undiscovered_landmark_hint() -> String:
 
 func _on_encounter() -> void:
 	if not _season_action_blocker().is_empty():
+		return
+	var hostile_idx := _nearby_hostile_band()
+	if hostile_idx >= 0 and turn < 31:
+		_resolve_band_skirmish(hostile_idx, true)
 		return
 	if turn < 31:
 		if not _share_camp_blocker().is_empty():
@@ -2194,12 +2490,11 @@ func _kinship_blocker() -> String:
 func _has_nearby_mate() -> bool:
 	var position: Vector2 = player_actor["position"]
 	for i in range(ai_bands.size()):
-		if _is_paranthropus_band(i):
+		if _is_paranthropus_band(i) or str(ai_bands[i].get("attitude", "friendly")) == "hostile":
 			continue
 		var band_position: Vector2 = ai_bands[i]["position"]
-		if position.distance_squared_to(band_position) <= MATE_RANGE * MATE_RANGE and _world_tile_visible(band_position):
-			if world.land_segment_clear(position, band_position):
-				return true
+		if position.distance_squared_to(band_position) <= MATE_RANGE * MATE_RANGE and world.land_segment_clear(position, band_position):
+			return true
 	return false
 
 
@@ -2267,7 +2562,8 @@ func _refresh_stats_bar() -> void:
 	if not is_instance_valid(stats_label):
 		return
 	var gen_text := "%d · aging" % generation if adult_age >= AGING_RANGE_PENALTY_AGE else str(generation)
-	stats_label.text = "FOOD   %d   ◇     KNOWLEDGE   %d   ◇     COHESION   %d   ◇     GEN   %s   ◇     HOMININS   %d" % [food, knowledge, cohesion, gen_text, PLAYER_COUNT]
+	var wound_tag := "   ◇   WOUNDED" if wounded_seasons > 0 else ""
+	stats_label.text = "FOOD   %d   ◇   KNOWLEDGE   %d   ◇   COHESION   %d   ◇   GEN   %s%s" % [food, knowledge, cohesion, gen_text, wound_tag]
 
 
 func _refresh_ui() -> void:
@@ -2319,8 +2615,14 @@ func _refresh_action_label() -> void:
 
 	var blocker := _season_action_blocker()
 	var tile_id: int = world.tile_id(tile)
+	var pred := _nearby_fightable_predator()
 	var prey := _nearby_huntable_prey()
-	if carcass_sites.has(tile_id):
+	if not pred.is_empty():
+		var can_slay := _player_combat_strength(true) >= 3
+		forage_button.text = "Slay %s" % pred["species"] if can_slay else "Fight %s" % pred["species"]
+		forage_button.disabled = not blocker.is_empty()
+		forage_button.tooltip_text = blocker if not blocker.is_empty() else ("Strike down this %s (leaves a rich carcass, +5 cohesion, +4 knowledge)." % pred["species"] if can_slay else "Clash to drive off this %s (−2 food, +3 cohesion)." % pred["species"])
+	elif carcass_sites.has(tile_id):
 		var scavenge_yield := _scavenge_food_gain(tile)
 		forage_button.text = "Scavenge +%d" % scavenge_yield
 		forage_button.disabled = not blocker.is_empty() or scavenge_yield == 0
@@ -2380,12 +2682,20 @@ func _refresh_action_label() -> void:
 		_refresh_skills_panel()
 
 	if turn < 31:
-		var share_blocker := _share_camp_blocker()
-		kinship_button.text = "Share −%d" % SHARE_CAMP_FOOD_COST
-		kinship_button.disabled = not blocker.is_empty() or not share_blocker.is_empty()
-		kinship_button.tooltip_text = blocker if not blocker.is_empty() else share_blocker
-		if kinship_button.tooltip_text.is_empty():
-			kinship_button.tooltip_text = "Share %d food with a nearby band for +6 knowledge, +4 cohesion, and a landmark tip." % SHARE_CAMP_FOOD_COST
+		var hostile_idx := _nearby_hostile_band()
+		if hostile_idx >= 0:
+			var p_str := _player_combat_strength(true)
+			var e_str := _band_combat_strength(hostile_idx)
+			kinship_button.text = "Clash (%dv%d)" % [p_str, e_str]
+			kinship_button.disabled = not blocker.is_empty()
+			kinship_button.tooltip_text = blocker if not blocker.is_empty() else "Engage %s in a skirmish (your strength %d vs %d). Victory seizes +14 food; defeat risks a raid & wound." % [ai_bands[hostile_idx]["label"], p_str, e_str]
+		else:
+			var share_blocker := _share_camp_blocker()
+			kinship_button.text = "Share −%d" % SHARE_CAMP_FOOD_COST
+			kinship_button.disabled = not blocker.is_empty() or not share_blocker.is_empty()
+			kinship_button.tooltip_text = blocker if not blocker.is_empty() else share_blocker
+			if kinship_button.tooltip_text.is_empty():
+				kinship_button.tooltip_text = "Share %d food with a nearby band for +6 knowledge, +4 cohesion, calm tensions, and a landmark tip." % SHARE_CAMP_FOOD_COST
 	else:
 		var kinship_blocker := _kinship_blocker()
 		kinship_button.text = "Meet kin"

@@ -182,17 +182,28 @@ func draw_actor_shadows(
 			continue
 		var position: Vector2 = band["position"]
 		if map_view.grow(65.0).has_point(world_to_screen.call(position)):
+			if str(band.get("attitude", "friendly")) == "hostile":
+				var hring := PackedVector2Array()
+				for i in range(20):
+					var a := TAU * float(i) / 20.0
+					hring.append(position + Vector2(cos(a) * 48.0, sin(a) * 26.0))
+				hring.append(hring[0])
+				var ring_alpha := 0.58 if bool(band.get("pursuing", false)) else 0.30
+				canvas.draw_polyline(hring, Color(0.90, 0.30, 0.22, ring_alpha * opacity), 1.6 if bool(band.get("pursuing", false)) else 1.2, true)
 			draw_ellipse_shadow(canvas, position + Vector2(0.0, 4.0), Vector2(44.0, 9.0), 0.22 * opacity)
 	for animal in wildlife:
 		var position: Vector2 = animal["at"]
 		if animal["opacity"] > 0.0 and map_view.grow(65.0).has_point(world_to_screen.call(position)):
 			if animal.get("is_predator", false):
+				var stalking := bool(animal.get("stalking", false))
 				var ring := PackedVector2Array()
 				for i in range(20):
 					var a := TAU * float(i) / 20.0
 					ring.append(position + Vector2(cos(a) * 44.0, sin(a) * 24.0))
 				ring.append(ring[0])
-				canvas.draw_polyline(ring, Color(0.84, 0.36, 0.25, 0.34 * float(animal["opacity"])), 1.3, true)
+				canvas.draw_polyline(ring, Color(0.92, 0.28, 0.20, (0.62 if stalking else 0.30) * float(animal["opacity"])), 1.8 if stalking else 1.3, true)
+				if stalking:
+					canvas.draw_line(position + Vector2(0, -10), player_position + Vector2(0, -10), Color(0.92, 0.32, 0.24, 0.35), 1.2, true)
 			draw_ellipse_shadow(canvas, position + Vector2(0, 4), animal["size"], 0.22 * animal["opacity"])
 
 
@@ -231,14 +242,47 @@ func draw_band_markers(
 		var pos: Vector2 = band["position"]
 		var ground: Vector2 = world_to_screen.call(pos)
 		var label: String = band["label"]
+		var attitude := str(band.get("attitude", "friendly"))
 		var tint: Color = band["color"]
+		if attitude == "hostile":
+			label += " · hostile"
+			tint = Color("#e36d57")
+		elif attitude == "wary":
+			label += " · wary"
 		var anchor := ground + Vector2(0, -55.0 * zoom_level)
 		var size := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
 		var badge := Rect2(anchor - Vector2(size.x * 0.5 + 5.0, size.y), size + Vector2(10, 4))
 		if not map_view.encloses(badge):
 			continue
-		canvas.draw_rect(badge, Color("#172421", 0.9))
-		canvas.draw_string(font, badge.position + Vector2(5.0, font.get_ascent(12) + 2.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, tint.lightened(0.4))
+		var bg := Color("#2e1817", 0.92) if attitude == "hostile" else Color("#172421", 0.9)
+		canvas.draw_rect(badge, bg)
+		if attitude == "hostile":
+			canvas.draw_rect(badge, Color("#d95b45", 0.85), false, 1.0)
+		canvas.draw_string(font, badge.position + Vector2(5.0, font.get_ascent(12) + 2.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, tint.lightened(0.35))
+
+
+func draw_combat_flashes(
+	canvas: CanvasItem,
+	map_view: Rect2,
+	world_to_screen: Callable,
+	flashes: Array[Dictionary]
+) -> void:
+	for flash in flashes:
+		var age: float = flash["age"]
+		var duration: float = flash["duration"]
+		var t := clampf(age / duration, 0.0, 1.0)
+		var alpha := 1.0 - t
+		var screen: Vector2 = world_to_screen.call(flash["at"])
+		if not map_view.grow(40.0).has_point(screen):
+			continue
+		var color: Color = flash["color"]
+		var ring_col := Color(color.r, color.g, color.b, 0.85 * alpha)
+		var radius := lerpf(12.0, 42.0, t)
+		canvas.draw_arc(screen + Vector2(0, -14), radius, 0.0, TAU, 24, ring_col, 2.5 * (1.0 - t * 0.5), true)
+		var slash := lerpf(10.0, 20.0, t)
+		var slash_col := Color(1.0, 0.88, 0.72, 0.9 * alpha)
+		canvas.draw_line(screen + Vector2(-slash, -14 - slash * 0.6), screen + Vector2(slash, -14 + slash * 0.6), slash_col, 2.2, true)
+		canvas.draw_line(screen + Vector2(slash, -14 - slash * 0.6), screen + Vector2(-slash, -14 + slash * 0.6), slash_col, 2.2, true)
 
 
 func draw_floating_texts(
@@ -881,6 +925,9 @@ func _draw_player_activity(canvas: CanvasItem, center: Vector2, activity: String
 		"hunting":
 			label = "HUNTING"
 			color = Color("#e39f73")
+		"fighting":
+			label = "SKIRMISH"
+			color = Color("#e86b58")
 		"learning":
 			label = "LEARNING"
 			color = Color("#f0c77f")
