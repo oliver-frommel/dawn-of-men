@@ -17,6 +17,49 @@ func draw_world(canvas: CanvasItem, width: float, height: float) -> void:
 		canvas.draw_line(Vector2(0, y), Vector2(width, y), Color(0.8, 0.76, 0.63, alpha), 1)
 
 
+func draw_baked_rect(
+	canvas: CanvasItem,
+	world_rect: Rect2,
+	discovered_landmarks: Dictionary,
+	is_dry_season := false,
+	depleted_tiles: Dictionary = {},
+	wildfire_tiles: Dictionary = {}
+) -> void:
+	canvas.draw_rect(world_rect, Color("#182826"))
+	var pad := Vector2(WorldMapScript.TILE_W, WorldMapScript.TILE_H + 84.0)
+	var first := (world_rect.position - pad) - WorldMapScript.MAP_ORIGIN
+	var last := (world_rect.end + pad) - WorldMapScript.MAP_ORIGIN
+	var min_depth := maxi(0, ceili(first.y / (WorldMapScript.TILE_H * 0.5)))
+	var max_depth := mini(WorldMapScript.WORLD_WIDTH + WorldMapScript.WORLD_HEIGHT - 2, floori(last.y / (WorldMapScript.TILE_H * 0.5)))
+	var min_diagonal := first.x / (WorldMapScript.TILE_W * 0.5)
+	var max_diagonal := last.x / (WorldMapScript.TILE_W * 0.5)
+
+	var tiles: Array[Vector2i] = []
+	for depth in range(min_depth, max_depth + 1):
+		var min_x := maxi(maxi(0, depth - WorldMapScript.WORLD_HEIGHT + 1), ceili((depth + min_diagonal) * 0.5))
+		var max_x := mini(mini(depth, WorldMapScript.WORLD_WIDTH - 1), floori((depth + max_diagonal) * 0.5))
+		for x in range(min_x, max_x + 1):
+			var tile := Vector2i(x, depth - x)
+			tiles.append(tile)
+			var center := world.tile_center(tile.x, tile.y)
+			var id := world.tile_id(tile)
+			var fire_state := str(wildfire_tiles.get(id, {}).get("state", ""))
+			_draw_terrain_ground(canvas, center, tile, world.terrain_at(tile), is_dry_season, depleted_tiles.has(id), fire_state)
+	for tile in tiles:
+		var center := world.tile_center(tile.x, tile.y)
+		var id := world.tile_id(tile)
+		var fire_info: Dictionary = wildfire_tiles.get(id, {})
+		if fire_info.is_empty():
+			_draw_terrain_details(canvas, center, world.terrain_at(tile), tile.x, tile.y, is_dry_season)
+		else:
+			_draw_wildfire_details(canvas, center, fire_info, tile.x, tile.y)
+		if depleted_tiles.has(id):
+			_draw_depleted_mark(canvas, center)
+		var landmark := world.landmark_for_tile(tile)
+		if not landmark.is_empty():
+			_draw_landmark_icon(canvas, center, str(landmark["kind"]), is_dry_season, discovered_landmarks.has(id))
+
+
 func draw_baked_chunk(
 	canvas: CanvasItem,
 	x0: int,

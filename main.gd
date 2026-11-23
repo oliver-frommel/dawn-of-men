@@ -11,10 +11,8 @@ class LayerNode extends Node2D:
 
 const W := 1440.0
 const H := 900.0
-const CHUNK_COLS := 4
-const CHUNK_ROWS := 4
-const CHUNK_W := 16
-const CHUNK_H := 12
+const CHUNK_PX := 1024
+const CHUNK_PAD := 2
 const PLAYER_SPEED := 64.0
 const TRAIL_READING_SPEED_BONUS := 12.0
 const ERECTUS_SPEED_BONUS := 16.0
@@ -1316,46 +1314,42 @@ func _build_map_layers() -> void:
 	chunk_root.name = "BakedChunks"
 	map_root.add_child(chunk_root)
 
-	map_chunks.resize(CHUNK_COLS * CHUNK_ROWS)
-	chunk_bounds.resize(CHUNK_COLS * CHUNK_ROWS)
+	map_chunks.clear()
+	chunk_bounds.clear()
 
-	# Add rasterized chunk sprites in isometric diagonal order (cx + cy) so raised hills overlap cleanly.
-	for diag in range(CHUNK_COLS + CHUNK_ROWS - 1):
-		for cx in range(CHUNK_COLS):
-			var cy := diag - cx
-			if cy < 0 or cy >= CHUNK_ROWS:
-				continue
-			var idx := cy * CHUNK_COLS + cx
-			var x0 := cx * CHUNK_W
-			var y0 := cy * CHUNK_H
-			var x1 := mini(WORLD_MAP_SCRIPT.WORLD_WIDTH, x0 + CHUNK_W)
-			var y1 := mini(WORLD_MAP_SCRIPT.WORLD_HEIGHT, y0 + CHUNK_H)
+	# Cover the entire world pixel bounds with an axis-aligned opaque grid (with 2px overscan
+	# + region_rect inset) so neighboring chunks meet seamlessly with zero alpha fringing.
+	var min_x := floorf(world.tile_center(0, WORLD_MAP_SCRIPT.WORLD_HEIGHT - 1).x - WORLD_MAP_SCRIPT.TILE_W)
+	var max_x := ceilf(world.tile_center(WORLD_MAP_SCRIPT.WORLD_WIDTH - 1, 0).x + WORLD_MAP_SCRIPT.TILE_W)
+	var min_y := floorf(world.tile_center(0, 0).y - WORLD_MAP_SCRIPT.TILE_H - 96.0)
+	var max_y := ceilf(world.tile_center(WORLD_MAP_SCRIPT.WORLD_WIDTH - 1, WORLD_MAP_SCRIPT.WORLD_HEIGHT - 1).y + WORLD_MAP_SCRIPT.TILE_H)
+	var cols := int(ceilf((max_x - min_x) / float(CHUNK_PX)))
+	var rows := int(ceilf((max_y - min_y) / float(CHUNK_PX)))
 
-			var top_pt: Vector2 = world.tile_center(x0, y0)
-			var right_pt: Vector2 = world.tile_center(x1 - 1, y0)
-			var bottom_pt: Vector2 = world.tile_center(x1 - 1, y1 - 1)
-			var left_pt: Vector2 = world.tile_center(x0, y1 - 1)
-			var min_x := floorf(left_pt.x - WORLD_MAP_SCRIPT.TILE_W)
-			var max_x := ceilf(right_pt.x + WORLD_MAP_SCRIPT.TILE_W)
-			var min_y := floorf(top_pt.y - WORLD_MAP_SCRIPT.TILE_H - 96.0)
-			var max_y := ceilf(bottom_pt.y + WORLD_MAP_SCRIPT.TILE_H)
-			var bounds := Rect2(Vector2(min_x, min_y), Vector2(max_x - min_x, max_y - min_y))
-			chunk_bounds[idx] = bounds
+	for cy in range(rows):
+		for cx in range(cols):
+			var rx := min_x + float(cx * CHUNK_PX)
+			var ry := min_y + float(cy * CHUNK_PX)
+			var rw := minf(float(CHUNK_PX), max_x - rx)
+			var rh := minf(float(CHUNK_PX), max_y - ry)
+			var bounds := Rect2(Vector2(rx, ry), Vector2(rw, rh))
+			chunk_bounds.append(bounds)
 
 			var sprite := Sprite2D.new()
 			sprite.name = "Chunk_%d_%d" % [cx, cy]
 			sprite.centered = false
 			sprite.position = bounds.position
+			sprite.region_enabled = true
+			sprite.region_rect = Rect2(float(CHUNK_PAD), float(CHUNK_PAD), bounds.size.x, bounds.size.y)
 			sprite.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 			sprite.visible = false
 			chunk_root.add_child(sprite)
 
-			map_chunks[idx] = {
-				"x0": x0, "y0": y0, "x1": x1, "y1": y1,
+			map_chunks.append({
 				"bounds": bounds, "sprite": sprite,
 				"viewport": null, "canvas": null,
 				"baked": false, "dirty": true
-			}
+			})
 
 	dynamic_world_layer = LayerNode.new()
 	dynamic_world_layer.name = "DynamicWorld"
@@ -1379,23 +1373,20 @@ func _ensure_chunk_baked(idx: int) -> void:
 			vp.render_target_update_mode = SubViewport.UPDATE_ONCE
 		return
 	var bounds: Rect2 = chunk["bounds"]
+	var padded := bounds.grow(float(CHUNK_PAD))
 	var vp := SubViewport.new()
 	vp.name = "ChunkVP_%d" % idx
-	vp.size = Vector2i(int(ceilf(bounds.size.x)), int(ceilf(bounds.size.y)))
-	vp.transparent_bg = true
+	vp.size = Vector2i(int(ceilf(padded.size.x)), int(ceilf(padded.size.y)))
+	vp.transparent_bg = false
 	vp.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
 	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
 	vp.disable_3d = true
 	add_child(vp)
 
-	var x0: int = chunk["x0"]
-	var y0: int = chunk["y0"]
-	var x1: int = chunk["x1"]
-	var y1: int = chunk["y1"]
 	var canvas := LayerNode.new()
-	canvas.position = -bounds.position
+	canvas.position = -padded.position
 	canvas.draw_cb = func(c: CanvasItem) -> void:
-		map_renderer.draw_baked_chunk(c, x0, y0, x1, y1, discovered_landmarks, turn % 2 == 1, depleted_tiles, wildfire_tiles)
+		map_renderer.draw_baked_rect(c, padded, discovered_landmarks, turn % 2 == 1, depleted_tiles, wildfire_tiles)
 	vp.add_child(canvas)
 
 	var sprite: Sprite2D = chunk["sprite"]
@@ -1406,21 +1397,18 @@ func _ensure_chunk_baked(idx: int) -> void:
 	chunk["dirty"] = false
 
 
-func _chunk_index_for_tile(tile: Vector2i) -> int:
-	var cx := clampi(floori(float(tile.x) / CHUNK_W), 0, CHUNK_COLS - 1)
-	var cy := clampi(floori(float(tile.y) / CHUNK_H), 0, CHUNK_ROWS - 1)
-	return cy * CHUNK_COLS + cx
-
-
 func _mark_chunk_dirty(tile: Vector2i) -> void:
 	if map_chunks.is_empty():
 		return
-	var idx := _chunk_index_for_tile(tile)
-	var chunk: Dictionary = map_chunks[idx]
-	chunk["dirty"] = true
-	var sprite: Sprite2D = chunk["sprite"]
-	if sprite.visible and chunk["baked"]:
-		_ensure_chunk_baked(idx)
+	var center: Vector2 = world.tile_center(tile.x, tile.y)
+	var tile_rect := Rect2(center - Vector2(WORLD_MAP_SCRIPT.TILE_W, WORLD_MAP_SCRIPT.TILE_H + 84.0), Vector2(WORLD_MAP_SCRIPT.TILE_W * 2.0, WORLD_MAP_SCRIPT.TILE_H * 2.0 + 96.0))
+	for idx in range(chunk_bounds.size()):
+		if chunk_bounds[idx].intersects(tile_rect):
+			var chunk: Dictionary = map_chunks[idx]
+			chunk["dirty"] = true
+			var sprite: Sprite2D = chunk["sprite"]
+			if sprite.visible and chunk["baked"]:
+				_ensure_chunk_baked(idx)
 
 
 func _mark_all_chunks_dirty() -> void:
