@@ -3,18 +3,14 @@ extends Node2D
 
 class LayerNode extends Node2D:
 	var draw_cb: Callable
-	var did_draw := false
 
 	func _draw() -> void:
-		did_draw = true
 		if draw_cb.is_valid():
 			draw_cb.call(self)
 
 
 const W := 1440.0
 const H := 900.0
-const CHUNK_PX := 1024
-const CHUNK_PAD := 2
 const PLAYER_SPEED := 64.0
 const TRAIL_READING_SPEED_BONUS := 12.0
 const ERECTUS_SPEED_BONUS := 16.0
@@ -190,9 +186,10 @@ var hominin_viewport: SubViewport
 var hominin_stage: Node3D
 var hominin_models: Array[Node3D] = []
 var map_root: Node2D
-var map_chunks: Array[Dictionary] = []
-var chunk_bounds: Array[Rect2] = []
-var baking_chunks: Array[int] = []
+var ground_mesh_node: MeshInstance2D
+var shoreline_layer: LayerNode
+var scenery_mesh_nodes: Array[MeshInstance2D] = []
+var baked_season_state := -1
 var dynamic_world_layer: LayerNode
 var overlay_layer: LayerNode
 var ui_refresh_timer := 0.0
@@ -235,18 +232,10 @@ func _ready() -> void:
 	queue_redraw()
 	_redraw_dynamic()
 	_check_band_encounters()
-	if not RenderingServer.frame_post_draw.is_connected(_on_frame_post_draw):
-		RenderingServer.frame_post_draw.connect(_on_frame_post_draw)
 
 
 func _exit_tree() -> void:
 	OS.low_processor_usage_mode = false
-	if RenderingServer.frame_post_draw.is_connected(_on_frame_post_draw):
-		RenderingServer.frame_post_draw.disconnect(_on_frame_post_draw)
-
-
-func _on_frame_post_draw() -> void:
-	_cleanup_baked_canvases()
 
 
 func _is_sim_paused() -> bool:
@@ -284,8 +273,6 @@ func _change_food(delta_amount: float) -> void:
 
 
 func _process(delta: float) -> void:
-	if DisplayServer.get_name() == "headless":
-		_cleanup_baked_canvases()
 	if toast_timer > 0:
 		toast_timer -= delta
 		if toast_timer <= 0 and is_instance_valid(toast_label):
@@ -1356,46 +1343,24 @@ func _build_map_layers() -> void:
 	map_root.name = "MapRoot"
 	add_child(map_root)
 
-	var chunk_root := Node2D.new()
-	chunk_root.name = "BakedChunks"
-	map_root.add_child(chunk_root)
+	ground_mesh_node = MeshInstance2D.new()
+	ground_mesh_node.name = "GroundMesh"
+	map_root.add_child(ground_mesh_node)
 
-	map_chunks.clear()
-	chunk_bounds.clear()
+	shoreline_layer = LayerNode.new()
+	shoreline_layer.name = "ShorelineLayer"
+	shoreline_layer.draw_cb = func(c: CanvasItem) -> void:
+		map_renderer.draw_shorelines(c)
+	map_root.add_child(shoreline_layer)
 
-	# Cover the entire world pixel bounds with an axis-aligned opaque grid (with 2px overscan
-	# + region_rect inset) so neighboring chunks meet seamlessly with zero alpha fringing.
-	var min_x := floorf(world.tile_center(0, WORLD_MAP_SCRIPT.WORLD_HEIGHT - 1).x - WORLD_MAP_SCRIPT.TILE_W)
-	var max_x := ceilf(world.tile_center(WORLD_MAP_SCRIPT.WORLD_WIDTH - 1, 0).x + WORLD_MAP_SCRIPT.TILE_W)
-	var min_y := floorf(world.tile_center(0, 0).y - WORLD_MAP_SCRIPT.TILE_H - 96.0)
-	var max_y := ceilf(world.tile_center(WORLD_MAP_SCRIPT.WORLD_WIDTH - 1, WORLD_MAP_SCRIPT.WORLD_HEIGHT - 1).y + WORLD_MAP_SCRIPT.TILE_H)
-	var cols := int(ceilf((max_x - min_x) / float(CHUNK_PX)))
-	var rows := int(ceilf((max_y - min_y) / float(CHUNK_PX)))
+	scenery_mesh_nodes.clear()
+	for q in range(4):
+		var q_node := MeshInstance2D.new()
+		q_node.name = "SceneryMesh_%d" % q
+		map_root.add_child(q_node)
+		scenery_mesh_nodes.append(q_node)
 
-	for cy in range(rows):
-		for cx in range(cols):
-			var rx := min_x + float(cx * CHUNK_PX)
-			var ry := min_y + float(cy * CHUNK_PX)
-			var rw := minf(float(CHUNK_PX), max_x - rx)
-			var rh := minf(float(CHUNK_PX), max_y - ry)
-			var bounds := Rect2(Vector2(rx, ry), Vector2(rw, rh))
-			chunk_bounds.append(bounds)
-
-			var sprite := Sprite2D.new()
-			sprite.name = "Chunk_%d_%d" % [cx, cy]
-			sprite.centered = false
-			sprite.position = bounds.position
-			sprite.region_enabled = true
-			sprite.region_rect = Rect2(float(CHUNK_PAD), float(CHUNK_PAD), bounds.size.x, bounds.size.y)
-			sprite.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
-			sprite.visible = false
-			chunk_root.add_child(sprite)
-
-			map_chunks.append({
-				"bounds": bounds, "sprite": sprite,
-				"viewport": null, "canvas": null,
-				"baked": false, "dirty": true
-			})
+	_rebuild_season_meshes()
 
 	dynamic_world_layer = LayerNode.new()
 	dynamic_world_layer.name = "DynamicWorld"
@@ -1408,105 +1373,40 @@ func _build_map_layers() -> void:
 	add_child(overlay_layer)
 
 
-func _ensure_chunk_baked(idx: int) -> void:
-	var chunk: Dictionary = map_chunks[idx]
-	if chunk["baked"] and not chunk["dirty"]:
+func _rebuild_season_meshes() -> void:
+	var dry_state := 1 if (turn % 2 == 1) else 0
+	if dry_state == baked_season_state:
 		return
-	var bounds: Rect2 = chunk["bounds"]
-	var padded := bounds.grow(float(CHUNK_PAD))
-	var vp: SubViewport = chunk["viewport"]
-	if vp == null:
-		vp = SubViewport.new()
-		vp.name = "ChunkVP_%d" % idx
-		vp.size = Vector2i(int(ceilf(padded.size.x)), int(ceilf(padded.size.y)))
-		vp.transparent_bg = false
-		vp.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
-		vp.render_target_update_mode = SubViewport.UPDATE_ONCE
-		vp.msaa_2d = Viewport.MSAA_DISABLED
-		vp.use_hdr_2d = false
-		vp.disable_3d = true
-		add_child(vp)
-		var sprite: Sprite2D = chunk["sprite"]
-		sprite.texture = vp.get_texture()
-		chunk["viewport"] = vp
-
-	var canvas: LayerNode = chunk["canvas"]
-	if not is_instance_valid(canvas):
-		canvas = LayerNode.new()
-		canvas.position = -padded.position
-		canvas.draw_cb = func(c: CanvasItem) -> void:
-			map_renderer.draw_baked_rect(c, padded, discovered_landmarks, turn % 2 == 1, depleted_tiles, wildfire_tiles)
-		vp.add_child(canvas)
-		chunk["canvas"] = canvas
-	else:
-		canvas.did_draw = false
-		canvas.queue_redraw()
-
-	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
-	chunk["baked"] = true
-	chunk["dirty"] = false
-	chunk["bake_frames"] = 0
-	if idx not in baking_chunks:
-		baking_chunks.append(idx)
-
-
-func _cleanup_baked_canvases() -> void:
-	if baking_chunks.is_empty():
-		return
-	var remaining: Array[int] = []
-	for idx in baking_chunks:
-		if idx < 0 or idx >= map_chunks.size():
+	baked_season_state = dry_state
+	var is_dry := dry_state == 1
+	if is_instance_valid(ground_mesh_node):
+		ground_mesh_node.mesh = null
+		ground_mesh_node.mesh = map_renderer.build_ground_mesh(is_dry)
+	var hw := WORLD_MAP_SCRIPT.WORLD_WIDTH / 2
+	var hh := WORLD_MAP_SCRIPT.WORLD_HEIGHT / 2
+	# Isometric back-to-front quadrant order: (0,0) -> (1,0) -> (0,1) -> (1,1).
+	var quads := [
+		Rect2i(0, 0, hw, hh),
+		Rect2i(hw, 0, WORLD_MAP_SCRIPT.WORLD_WIDTH - hw, hh),
+		Rect2i(0, hh, hw, WORLD_MAP_SCRIPT.WORLD_HEIGHT - hh),
+		Rect2i(hw, hh, WORLD_MAP_SCRIPT.WORLD_WIDTH - hw, WORLD_MAP_SCRIPT.WORLD_HEIGHT - hh),
+	]
+	for q in range(mini(scenery_mesh_nodes.size(), quads.size())):
+		var node := scenery_mesh_nodes[q]
+		if not is_instance_valid(node):
 			continue
-		var chunk: Dictionary = map_chunks[idx]
-		var canvas: LayerNode = chunk["canvas"]
-		var vp: SubViewport = chunk["viewport"]
-		if not is_instance_valid(canvas):
-			chunk["canvas"] = null
-			if is_instance_valid(vp):
-				vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
-			continue
-		if not canvas.did_draw:
-			# Canvas has not executed _draw() yet; keep UPDATE_ONCE armed for the next frame.
-			if is_instance_valid(vp):
-				vp.render_target_update_mode = SubViewport.UPDATE_ONCE
-			remaining.append(idx)
-			continue
-		var frames: int = int(chunk.get("bake_frames", 0)) + 1
-		chunk["bake_frames"] = frames
-		# Allow 2 post-draw passes after _draw() so newly created SubViewports always commit their FBO.
-		if frames >= 2:
-			canvas.queue_free()
-			chunk["canvas"] = null
-			if is_instance_valid(vp):
-				vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
-		else:
-			if is_instance_valid(vp):
-				vp.render_target_update_mode = SubViewport.UPDATE_ONCE
-			remaining.append(idx)
-	baking_chunks = remaining
+		var r: Rect2i = quads[q]
+		node.mesh = null
+		node.mesh = map_renderer.build_scenery_mesh(is_dry, r.position.x, r.position.y, r.end.x, r.end.y)
 
 
-func _mark_chunk_dirty(tile: Vector2i) -> void:
-	if map_chunks.is_empty():
-		return
-	var center: Vector2 = world.tile_center(tile.x, tile.y)
-	var tile_rect := Rect2(center - Vector2(WORLD_MAP_SCRIPT.TILE_W, WORLD_MAP_SCRIPT.TILE_H + 84.0), Vector2(WORLD_MAP_SCRIPT.TILE_W * 2.0, WORLD_MAP_SCRIPT.TILE_H * 2.0 + 96.0))
-	for idx in range(chunk_bounds.size()):
-		if chunk_bounds[idx].intersects(tile_rect):
-			var chunk: Dictionary = map_chunks[idx]
-			chunk["dirty"] = true
-			var sprite: Sprite2D = chunk["sprite"]
-			if sprite.visible and chunk["baked"]:
-				_ensure_chunk_baked(idx)
+func _mark_chunk_dirty(_tile: Vector2i) -> void:
+	_redraw_dynamic()
 
 
 func _mark_all_chunks_dirty() -> void:
-	for idx in range(map_chunks.size()):
-		var chunk: Dictionary = map_chunks[idx]
-		chunk["dirty"] = true
-		var sprite: Sprite2D = chunk["sprite"]
-		if sprite.visible and chunk["baked"]:
-			_ensure_chunk_baked(idx)
+	_rebuild_season_meshes()
+	_redraw_dynamic()
 
 
 func _sync_map_transform() -> void:
@@ -1514,16 +1414,6 @@ func _sync_map_transform() -> void:
 		return
 	map_root.position = _map_draw_origin()
 	map_root.scale = Vector2.ONE * zoom_level
-	var world_tl := _screen_to_world(MAP_VIEW.position)
-	var world_br := _screen_to_world(MAP_VIEW.end)
-	var view_world := Rect2(world_tl, world_br - world_tl).grow(80.0)
-	for idx in range(chunk_bounds.size()):
-		var in_view := chunk_bounds[idx].intersects(view_world)
-		var chunk: Dictionary = map_chunks[idx]
-		var sprite: Sprite2D = chunk["sprite"]
-		sprite.visible = in_view
-		if in_view:
-			_ensure_chunk_baked(idx)
 	_request_3d_update()
 
 
@@ -1539,7 +1429,11 @@ func _draw() -> void:
 
 
 func _draw_dynamic_world(canvas: CanvasItem) -> void:
-	map_renderer.draw_dynamic_world(canvas, MAP_VIEW, _world_to_screen, collectibles, carcass_sites, player_actor, ai_bands, wildlife)
+	map_renderer.draw_dynamic_world(
+		canvas, MAP_VIEW, _world_to_screen, collectibles, carcass_sites,
+		player_actor, ai_bands, wildlife, discovered_landmarks,
+		turn % 2 == 1, depleted_tiles, wildfire_tiles
+	)
 
 
 func _draw_overlay(canvas: CanvasItem) -> void:

@@ -15,9 +15,16 @@ Baseline measurements captured in Godot 4.7.2 (`GL Compatibility`) on the `64×4
 
 ## Planned Optimizations (Priority Order)
 
-### 1. Decouple and raster-cache the static 2D map layer (Implemented)
-- **Done**: Baked static terrain ground, Civ 3-style shaded hills, and raised scenery into lazy-allocated opaque axis-aligned `1024×1024` `SubViewport` chunks (`UPDATE_ONCE`, with `2 px` overscan + `Sprite2D.region_rect` inset to prevent seam fringing) rendered with frustum culling, replacing tens of thousands of per-frame vector primitives with `4–6` textured quads per frame.
-- **Measured result**: Dynamic frame time at zoom `0.75` dropped from `103.8 ms` → **`~6 ms`** uncapped (paced at `16.6 ms` / 60 FPS).
+### 1. Replace `CanvasItem` / `SubViewport` map rendering with batched 2D `ArrayMesh` geometry (Implemented)
+- **Done**: Replaced all `16` terrain `SubViewport` chunk render targets and ~200,000 individual `CanvasItem.draw_*` calls with batched `MeshInstance2D` (`ArrayMesh`) geometry built directly in `map_renderer.gd`:
+  - `GroundMesh` (`1` `MeshInstance2D`, `~41k` tris): all 3,072 shaded ground diamonds + ground texture speckles in 1 draw call.
+  - `ShorelineLayer` (`1` static `LayerNode` drawn once): only the `156` shoreline textured quads (`2.9 MB`).
+  - `SceneryMesh_0..3` (`4` frustum-culled isometric quadrant `MeshInstance2D`s, `~503k` tris total, `~125k` per quadrant): all Civ 3 hills, volcanic ridges, trees, acacias, shrubs, grass, flowers, boulders, reeds, and palms in 1–4 GPU draw calls with zero chunk seams, razor-sharp vector zoom, and zero `SubViewport` FBO races.
+  - Dynamic tile overlays (depleted rings, active wildfires, 8 landmarks, carcasses, collectibles, shadows) render on `DynamicWorld` culled to `MAP_VIEW`, so foraging/discoveries/wildfires never rebuild static terrain meshes.
+- **Measured result**:
+  - Terrain `SubViewport`s dropped from **`16` → `0`** (only the single `3.5 MB` 3D `hominin_viewport` remains).
+  - Static CPU RAM dropped from **`683.2 MB` peak → `~61 MB` steady / `~77–94 MB` peak**, and eliminated hundreds of thousands of retained OpenGL-over-Metal VBOs on macOS.
+  - Full startup + map build: **`~780 ms`** (entire valley renders immediately on frame 1); Wet ↔ Dry season color rebuild: **`~190 ms`** once every 28s.
 
 ### 2. Reduce 3D draw calls, merge procedural meshes, and cull off-screen actors (Implemented)
 - **Done**:
