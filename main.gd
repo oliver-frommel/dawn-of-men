@@ -235,14 +235,18 @@ func _ready() -> void:
 	queue_redraw()
 	_redraw_dynamic()
 	_check_band_encounters()
-	if not RenderingServer.frame_post_draw.is_connected(_cleanup_baked_canvases):
-		RenderingServer.frame_post_draw.connect(_cleanup_baked_canvases)
+	if not RenderingServer.frame_post_draw.is_connected(_on_frame_post_draw):
+		RenderingServer.frame_post_draw.connect(_on_frame_post_draw)
 
 
 func _exit_tree() -> void:
 	OS.low_processor_usage_mode = false
-	if RenderingServer.frame_post_draw.is_connected(_cleanup_baked_canvases):
-		RenderingServer.frame_post_draw.disconnect(_cleanup_baked_canvases)
+	if RenderingServer.frame_post_draw.is_connected(_on_frame_post_draw):
+		RenderingServer.frame_post_draw.disconnect(_on_frame_post_draw)
+
+
+func _on_frame_post_draw() -> void:
+	_cleanup_baked_canvases()
 
 
 func _is_sim_paused() -> bool:
@@ -280,7 +284,8 @@ func _change_food(delta_amount: float) -> void:
 
 
 func _process(delta: float) -> void:
-	_cleanup_baked_canvases()
+	if DisplayServer.get_name() == "headless":
+		_cleanup_baked_canvases()
 	if toast_timer > 0:
 		toast_timer -= delta
 		if toast_timer <= 0 and is_instance_valid(toast_label):
@@ -1416,7 +1421,9 @@ func _ensure_chunk_baked(idx: int) -> void:
 		vp.size = Vector2i(int(ceilf(padded.size.x)), int(ceilf(padded.size.y)))
 		vp.transparent_bg = false
 		vp.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
-		vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+		vp.msaa_2d = Viewport.MSAA_DISABLED
+		vp.use_hdr_2d = false
 		vp.disable_3d = true
 		add_child(vp)
 		var sprite: Sprite2D = chunk["sprite"]
@@ -1438,6 +1445,7 @@ func _ensure_chunk_baked(idx: int) -> void:
 	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
 	chunk["baked"] = true
 	chunk["dirty"] = false
+	chunk["bake_frames"] = 0
 	if idx not in baking_chunks:
 		baking_chunks.append(idx)
 
@@ -1457,12 +1465,23 @@ func _cleanup_baked_canvases() -> void:
 			if is_instance_valid(vp):
 				vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 			continue
-		if canvas.did_draw:
+		if not canvas.did_draw:
+			# Canvas has not executed _draw() yet; keep UPDATE_ONCE armed for the next frame.
+			if is_instance_valid(vp):
+				vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+			remaining.append(idx)
+			continue
+		var frames: int = int(chunk.get("bake_frames", 0)) + 1
+		chunk["bake_frames"] = frames
+		# Allow 2 post-draw passes after _draw() so newly created SubViewports always commit their FBO.
+		if frames >= 2:
 			canvas.queue_free()
 			chunk["canvas"] = null
 			if is_instance_valid(vp):
 				vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		else:
+			if is_instance_valid(vp):
+				vp.render_target_update_mode = SubViewport.UPDATE_ONCE
 			remaining.append(idx)
 	baking_chunks = remaining
 
