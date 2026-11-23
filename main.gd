@@ -193,6 +193,9 @@ var chunk_bounds: Array[Rect2] = []
 var dynamic_world_layer: LayerNode
 var overlay_layer: LayerNode
 var ui_refresh_timer := 0.0
+var viewport_3d_timer := 0.0
+var pending_3d_frames := 0
+var season_bar_timer := 0.0
 var wildlife: Array[Dictionary] = []
 var wildlife_epoch := -1
 var explored_tiles: Dictionary = {}
@@ -273,11 +276,18 @@ func _process(delta: float) -> void:
 	var texts_changed := _update_floating_texts(delta)
 	var flashes_changed := _update_combat_flashes(delta)
 	var sim_paused := _is_sim_paused()
+	OS.low_processor_usage_mode = sim_paused
 	for animal in wildlife:
 		var model: Node = animal["model"]
 		if is_instance_valid(model):
-			model.set_process(not sim_paused)
+			var want_process := not sim_paused
+			if model.is_processing() != want_process:
+				model.set_process(want_process)
 	if sim_paused:
+		if pending_3d_frames > 0:
+			pending_3d_frames -= 1
+		elif is_instance_valid(hominin_viewport) and hominin_viewport.render_target_update_mode != SubViewport.UPDATE_DISABLED:
+			hominin_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		if texts_changed or flashes_changed:
 			_redraw_dynamic()
 		return
@@ -312,12 +322,17 @@ func _process(delta: float) -> void:
 	_check_predator_encounters()
 	var picked_up := _check_collectible_pickups()
 	var task_changed := _update_active_task(sim_delta)
-	_advance_clock(sim_delta)
+	_advance_clock(sim_delta, delta)
 	ui_refresh_timer += delta
 	if picked_up or ((moved or bands_moved or wildlife_changed) and ui_refresh_timer >= 0.20):
 		ui_refresh_timer = 0.0
 		_refresh_action_label()
-	if wildlife_changed or moved or bands_need_redraw or task_changed or texts_changed or flashes_changed or picked_up:
+	viewport_3d_timer += delta
+	var ambient_tick := viewport_3d_timer >= (1.0 / 30.0)
+	if moved or ambient_tick:
+		_request_3d_update()
+	var immediate_redraw := moved or task_changed or texts_changed or flashes_changed or picked_up
+	if immediate_redraw or ((wildlife_changed or bands_need_redraw) and ambient_tick):
 		_redraw_dynamic()
 	var action_time := float(player_actor.get("action_time", 0.0))
 	if action_time > 0.0 and active_task.is_empty():
@@ -329,7 +344,7 @@ func _process(delta: float) -> void:
 			_redraw_dynamic()
 
 
-func _advance_clock(sim_delta: float) -> void:
+func _advance_clock(sim_delta: float, real_delta := 0.25) -> void:
 	if _run_ended():
 		return
 	var tile: Vector2i = world.tile_from_world(player_actor["position"])
@@ -347,9 +362,13 @@ func _advance_clock(sim_delta: float) -> void:
 	season_elapsed += sim_delta
 	if season_elapsed >= SEASON_DURATION:
 		season_elapsed -= SEASON_DURATION
+		season_bar_timer = 0.0
 		_advance_season()
 	else:
-		_refresh_season_bar(tile)
+		season_bar_timer += real_delta
+		if season_bar_timer >= 0.25:
+			season_bar_timer = 0.0
+			_refresh_season_bar(tile)
 
 
 func _reveal_around(center: Vector2i, radius: int) -> bool:
@@ -543,7 +562,7 @@ func _build_hominin_viewport() -> void:
 	hominin_viewport.size = Vector2i(roundi(MAP_VIEW.size.x), roundi(MAP_VIEW.size.y))
 	hominin_viewport.transparent_bg = true
 	hominin_viewport.own_world_3d = true
-	hominin_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	hominin_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 	hominin_viewport.msaa_3d = Viewport.MSAA_DISABLED
 	add_child(hominin_viewport)
 
@@ -579,6 +598,13 @@ func _build_hominin_viewport() -> void:
 	camera.make_current()
 
 
+func _request_3d_update() -> void:
+	if is_instance_valid(hominin_viewport):
+		hominin_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	viewport_3d_timer = 0.0
+	pending_3d_frames = 1
+
+
 func _is_paranthropus_band(band_index: int) -> bool:
 	return band_index == 0 and turn >= 9 and turn <= 20
 
@@ -598,6 +624,10 @@ func _sync_hominin_band(actor: Dictionary, band_index: int, player_controlled: b
 		current_stage = 1
 	var group_color: Color = Color("#e5b267") if player_controlled else actor["color"]
 	var opacity: float = 1.0 if player_controlled else actor["opacity"]
+	var live_position: bool = player_controlled or actor["on_charted_land"]
+	var has_pos := opacity > 0.0 and (live_position or actor["last_seen"] != null)
+	var center: Vector2 = (actor["position"] if live_position else actor["last_seen"]) if has_pos else Vector2.ZERO
+	var band_on_screen := has_pos and MAP_VIEW.grow(150.0 * zoom_level).has_point(_world_to_screen(center))
 	for slot in range(model_count):
 		var model_index := model_offset + slot
 		var person := 1 if player_controlled else slot
@@ -607,26 +637,25 @@ func _sync_hominin_band(actor: Dictionary, band_index: int, player_controlled: b
 		var model: Node3D
 		if model_index >= hominin_models.size():
 			model = HOMININ_MODEL_SCRIPT.new() as Node3D
-			model.call("configure", current_stage, variant, robust, wrapping, group_color)
+			model.configure(current_stage, variant, robust, wrapping, group_color)
 			model.set_meta("model_signature", signature)
 			hominin_models.append(model)
 			hominin_stage.add_child(model)
+			_request_3d_update()
 		else:
 			model = hominin_models[model_index]
 			if str(model.get_meta("model_signature", "")) != signature:
 				model.queue_free()
 				model = HOMININ_MODEL_SCRIPT.new() as Node3D
-				model.call("configure", current_stage, variant, robust, wrapping, group_color)
+				model.configure(current_stage, variant, robust, wrapping, group_color)
 				model.set_meta("model_signature", signature)
 				hominin_models[model_index] = model
 				hominin_stage.add_child(model)
-		model.call("set_opacity", opacity)
-		if opacity <= 0.0:
+				_request_3d_update()
+		if not band_on_screen:
+			model.visible = false
 			continue
-		var live_position: bool = player_controlled or actor["on_charted_land"]
-		if not live_position and actor["last_seen"] == null:
-			continue
-		var center: Vector2 = actor["position"] if live_position else actor["last_seen"]
+		model.set_opacity(opacity)
 		var ground := center + Vector2((person - 1) * 25, -3 + (person % 2) * 3)
 		if not player_controlled:
 			while not world.land_segment_clear(center, ground):
@@ -643,7 +672,7 @@ func _sync_hominin_band(actor: Dictionary, band_index: int, player_controlled: b
 		model.position = Vector3(local.x / 45.0, (MAP_VIEW.size.y - local.y) / 45.0, screen.y / MAP_VIEW.size.y * 0.02)
 		model.scale = Vector3.ONE * 0.55 * zoom_level
 		if live_position:
-			model.call("set_pose", actor["moving"], float(actor["gait_phase"]) + float(person) * TAU / 3.0, actor["heading"], delta)
+			model.set_pose(actor["moving"], float(actor["gait_phase"]) + float(person) * TAU / 3.0, actor["heading"], delta)
 
 
 func _wildlife_epoch() -> int:
@@ -878,7 +907,7 @@ func _update_wildlife(delta: float) -> bool:
 			_position_wildlife_model(animal)
 			if next > 0.0 and on_screen:
 				changed = true
-		if next > 0.0:
+		if next > 0.0 and on_screen:
 			model.set_motion(animal["moving"], animal["heading"], delta)
 	return changed
 
@@ -1435,6 +1464,7 @@ func _sync_map_transform() -> void:
 		sprite.visible = in_view
 		if in_view:
 			_ensure_chunk_baked(idx)
+	_request_3d_update()
 
 
 func _redraw_dynamic() -> void:

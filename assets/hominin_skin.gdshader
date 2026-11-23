@@ -38,7 +38,7 @@ void fragment() {
 	}
 	float mottling = value_noise(world_position * 22.0);
 	float pores = hash31(floor(world_position * 110.0));
-	ALBEDO = skin_tone * (0.90 + mottling * 0.14 + (pores - 0.5) * 0.025);
+	ALBEDO = skin_tone * COLOR.rgb * (0.90 + mottling * 0.14 + (pores - 0.5) * 0.025);
 	ROUGHNESS = 0.86;
 	SPECULAR = 0.22;
 }

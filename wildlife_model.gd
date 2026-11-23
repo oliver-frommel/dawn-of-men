@@ -13,6 +13,7 @@ var is_predator := false
 var is_moving := false
 var opaque_materials: Dictionary = {}
 var fade_materials: Dictionary[StandardMaterial3D, StandardMaterial3D] = {}
+var _shared_material: StandardMaterial3D
 var _mesh_batches: Dictionary = {}
 
 func configure(species_name: String, phase: float) -> void:
@@ -66,7 +67,7 @@ func set_motion(moving: bool, heading: Vector2, delta: float) -> void:
 
 
 func _process(delta: float) -> void:
-	if not is_instance_valid(figure):
+	if not visible or not is_instance_valid(figure):
 		return
 	var blend := 1.0 - exp(-10.0 * delta)
 	gait_weight = lerpf(gait_weight, float(is_moving), blend)
@@ -182,11 +183,13 @@ func _build() -> void:
 			neck_length = 0.10
 			animal_scale = 0.90
 			is_predator = true
-	var coat := _material(coat_color)
-	var dark := _material(dark_color)
-	var mane := _material(mane_color)
-	var cream := _material(cream_color)
-	var hoof := _material(hoof_color)
+	_shared_material = _material(Color.WHITE)
+	_shared_material.vertex_color_use_as_albedo = true
+	var coat := coat_color
+	var dark := dark_color
+	var mane := mane_color
+	var cream := cream_color
+	var hoof := hoof_color
 	var hip := leg_length
 	var shoulder := hip + body_height * 0.46
 	var width := 0.29 if trunk else (0.23 if heavy else 0.18)
@@ -261,7 +264,7 @@ func _build() -> void:
 	_flush_batches()
 	figure.scale = Vector3.ONE * animal_scale
 
-func _build_trunk(coat: Material, ivory: Material) -> void:
+func _build_trunk(coat: Color, ivory: Color) -> void:
 	var previous := Vector3(0, -0.04, 0.21)
 	for i in range(1, 10):
 		var t := float(i) / 9.0
@@ -321,12 +324,10 @@ func _build_torso(length: float, depth: float, width: float, center: float, coat
 			for index in [a, b, a + 1, b, b + 1, a + 1]:
 				surface.add_index(index)
 	surface.generate_normals()
-	var material := _material(Color.WHITE)
-	material.vertex_color_use_as_albedo = true
 	var body := MeshInstance3D.new()
 	body.name = "Torso"
 	body.mesh = surface.commit()
-	body.material_override = material
+	body.material_override = _shared_material
 	figure.add_child(body)
 
 func _material(color: Color) -> StandardMaterial3D:
@@ -342,13 +343,34 @@ func _pivot(parent: Node3D, point: Vector3, label: String) -> Node3D:
 	parent.add_child(node)
 	return node
 
-func _get_batch(parent: Node3D, material: Material) -> SurfaceTool:
-	var key := "%d:%d" % [parent.get_instance_id(), material.get_instance_id()]
+func _get_batch(parent: Node3D) -> SurfaceTool:
+	var key := parent.get_instance_id()
 	if not _mesh_batches.has(key):
 		var st := SurfaceTool.new()
 		st.begin(Mesh.PRIMITIVE_TRIANGLES)
-		_mesh_batches[key] = {"parent": parent, "material": material, "st": st}
+		_mesh_batches[key] = {"parent": parent, "st": st}
 	return _mesh_batches[key]["st"]
+
+
+func _append_colored_mesh(parent: Node3D, mesh: Mesh, xform: Transform3D, tint: Color) -> void:
+	var st := _get_batch(parent)
+	var arr := mesh.surface_get_arrays(0)
+	var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var normals: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+	var indices = arr[Mesh.ARRAY_INDEX]
+	var normal_basis := xform.basis.inverse().transposed()
+	if indices != null and indices.size() > 0:
+		for idx in indices:
+			st.set_color(tint)
+			if idx < normals.size():
+				st.set_normal((normal_basis * normals[idx]).normalized())
+			st.add_vertex(xform * verts[idx])
+	else:
+		for i in range(verts.size()):
+			st.set_color(tint)
+			if i < normals.size():
+				st.set_normal((normal_basis * normals[i]).normalized())
+			st.add_vertex(xform * verts[i])
 
 
 func _flush_batches() -> void:
@@ -358,12 +380,12 @@ func _flush_batches() -> void:
 		var mesh := st.commit()
 		var instance := MeshInstance3D.new()
 		instance.mesh = mesh
-		instance.material_override = entry["material"]
+		instance.material_override = _shared_material
 		entry["parent"].add_child(instance)
 	_mesh_batches.clear()
 
 
-func _add_segment(parent: Node3D, start: Vector3, finish: Vector3, radius_start: float, radius_end: float, material: Material) -> void:
+func _add_segment(parent: Node3D, start: Vector3, finish: Vector3, radius_start: float, radius_end: float, tint: Color) -> void:
 	var direction := finish - start
 	if direction.length_squared() < 0.000001:
 		return
@@ -374,14 +396,14 @@ func _add_segment(parent: Node3D, start: Vector3, finish: Vector3, radius_start:
 	mesh.radial_segments = 7
 	mesh.rings = 1
 	var xform := Transform3D(Basis(Quaternion(Vector3.UP, direction.normalized())), (start + finish) * 0.5)
-	_get_batch(parent, material).append_from(mesh, 0, xform)
+	_append_colored_mesh(parent, mesh, xform, tint)
 
 
-func _add_ellipsoid(parent: Node3D, _label: String, center: Vector3, radii: Vector3, material: Material) -> void:
+func _add_ellipsoid(parent: Node3D, _label: String, center: Vector3, radii: Vector3, tint: Color) -> void:
 	var mesh := SphereMesh.new()
 	mesh.radius = 1.0
 	mesh.height = 2.0
 	mesh.radial_segments = 8
 	mesh.rings = 5
 	var xform := Transform3D(Basis.from_scale(radii), center)
-	_get_batch(parent, material).append_from(mesh, 0, xform)
+	_append_colored_mesh(parent, mesh, xform, tint)

@@ -21,10 +21,14 @@ var right_shin: Node3D
 var left_ankle: Node3D
 var right_ankle: Node3D
 var gait_weight := 0.0
+var pose_initialized := false
+var last_heading := Vector2.ZERO
 var model_opacity := 1.0
 var textured_materials: Array[ShaderMaterial] = []
 var detail_materials: Array[StandardMaterial3D] = []
 var _mesh_batches: Dictionary = {}
+var _skin_mat: ShaderMaterial
+var _detail_mat: StandardMaterial3D
 
 const STANCE_FRACTION := 0.60
 const FOOT_RADIUS := 0.05
@@ -62,6 +66,9 @@ func set_opacity(opacity: float) -> void:
 func set_pose(walking: bool, phase: float, heading: Vector2, delta: float) -> void:
 	if not is_instance_valid(figure) or not is_instance_valid(upper_body):
 		return
+	if pose_initialized and not walking and gait_weight <= 0.0005 and heading.distance_squared_to(last_heading) < 0.0001:
+		return
+	last_heading = heading
 	var width_scale := 1.12
 	var height_scale := 1.12
 	if species_stage == 0:
@@ -86,6 +93,9 @@ func set_pose(walking: bool, phase: float, heading: Vector2, delta: float) -> vo
 
 	var pose_blend := 1.0 - exp(-12.0 * delta)
 	gait_weight = lerpf(gait_weight, float(walking), pose_blend)
+	if not walking and gait_weight < 0.0005:
+		gait_weight = 0.0
+	pose_initialized = true
 	var stoop := 1.0 if species_stage == 0 else (0.6 if is_robust else 0.0)
 	var extra_lean := stoop * lerpf(0.10, 0.29, gait_weight)
 	var cycle := fposmod(phase / TAU, 1.0)
@@ -166,34 +176,29 @@ func _build_body() -> void:
 		base_tone = [Color("#3a2820"), Color("#432d23"), Color("#4b3226")][body_variant % 3]
 	elif is_robust:
 		base_tone = [Color("#30221c"), Color("#392720"), Color("#422d23")][body_variant % 3]
-	var skin := ShaderMaterial.new()
-	skin.shader = SKIN_SHADER
-	skin.set_shader_parameter("skin_tone", base_tone)
-	var face := ShaderMaterial.new()
-	face.shader = SKIN_SHADER
-	face.set_shader_parameter("skin_tone", base_tone.lightened(0.08))
-	var shadow_skin := ShaderMaterial.new()
-	shadow_skin.shader = SKIN_SHADER
-	shadow_skin.set_shader_parameter("skin_tone", base_tone.darkened(0.23))
-	textured_materials.assign([skin, face, shadow_skin])
-	var body_surface: Material = skin
+	_skin_mat = ShaderMaterial.new()
+	_skin_mat.shader = SKIN_SHADER
+	_skin_mat.set_shader_parameter("skin_tone", base_tone)
+	textured_materials.assign([_skin_mat])
+	var skin := {"mat": _skin_mat, "color": Color.WHITE}
+	var face := {"mat": _skin_mat, "color": Color(1.08, 1.08, 1.08)}
+	var shadow_skin := {"mat": _skin_mat, "color": Color(0.77, 0.77, 0.77)}
+	var body_surface: Dictionary = skin
 	if species_stage == 0:
 		var fur := ShaderMaterial.new()
 		fur.shader = FUR_SHADER
 		var fur_tones := [Color("#765038"), Color("#825a3e"), Color("#6c4833")]
 		fur.set_shader_parameter("fur_tone", fur_tones[body_variant % fur_tones.size()])
 		textured_materials.append(fur)
-		body_surface = fur
-	var hair := StandardMaterial3D.new()
-	hair.albedo_color = Color("#211711").lightened(float(body_variant) * 0.035)
-	hair.roughness = 0.94
-	var eye := StandardMaterial3D.new()
-	eye.albedo_color = Color("#120f0d")
-	eye.roughness = 0.45
-	var cloth := StandardMaterial3D.new()
-	cloth.albedo_color = clan_color.darkened(0.28)
-	cloth.roughness = 1.0
-	detail_materials.assign([hair, eye, cloth])
+		body_surface = {"mat": fur, "color": Color.WHITE}
+	_detail_mat = StandardMaterial3D.new()
+	_detail_mat.albedo_color = Color.WHITE
+	_detail_mat.roughness = 0.94
+	_detail_mat.vertex_color_use_as_albedo = true
+	detail_materials.assign([_detail_mat])
+	var hair := {"mat": _detail_mat, "color": Color("#211711").lightened(float(body_variant) * 0.035)}
+	var eye := {"mat": _detail_mat, "color": Color("#120f0d")}
+	var cloth := {"mat": _detail_mat, "color": clan_color.darkened(0.28)}
 
 	var female := body_variant % 3 == 1
 	var shoulder_width := 0.22 if species_stage < 2 else 0.20
@@ -309,7 +314,7 @@ func _build_body() -> void:
 		_add_loft(upper_body, "WovenHideWrap", loincloth_profile, cloth, 12)
 	_flush_batches()
 
-func _add_head(parent: Node3D, skin: Material, face: Material, shadow_skin: Material, hair: StandardMaterial3D, eye: StandardMaterial3D) -> void:
+func _add_head(parent: Node3D, skin: Dictionary, face: Dictionary, shadow_skin: Dictionary, hair: Dictionary, eye: Dictionary) -> void:
 	var female := body_variant % 3 == 1
 	var jaw_width := 0.092 if is_robust else 0.078
 	if female:
@@ -370,9 +375,26 @@ func _get_batch(parent: Node3D, material: Material) -> SurfaceTool:
 	return _mesh_batches[key]["st"]
 
 
-func _append_primitive(parent: Node3D, mesh: PrimitiveMesh, xform: Transform3D, material: Material) -> void:
-	var st := _get_batch(parent, material)
-	st.append_from(mesh, 0, xform)
+func _append_colored_mesh(parent: Node3D, mesh: Mesh, xform: Transform3D, spec: Dictionary) -> void:
+	var st := _get_batch(parent, spec["mat"])
+	var tint: Color = spec["color"]
+	var arr := mesh.surface_get_arrays(0)
+	var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var normals: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+	var indices = arr[Mesh.ARRAY_INDEX]
+	var normal_basis := xform.basis.inverse().transposed()
+	if indices != null and indices.size() > 0:
+		for idx in indices:
+			st.set_color(tint)
+			if idx < normals.size():
+				st.set_normal((normal_basis * normals[idx]).normalized())
+			st.add_vertex(xform * verts[idx])
+	else:
+		for i in range(verts.size()):
+			st.set_color(tint)
+			if i < normals.size():
+				st.set_normal((normal_basis * normals[i]).normalized())
+			st.add_vertex(xform * verts[i])
 
 
 func _flush_batches() -> void:
@@ -387,7 +409,7 @@ func _flush_batches() -> void:
 	_mesh_batches.clear()
 
 
-func _add_loft(parent: Node3D, _label: String, profile: PackedVector4Array, material: Material, sides: int) -> void:
+func _add_loft(parent: Node3D, _label: String, profile: PackedVector4Array, spec: Dictionary, sides: int) -> void:
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var lo_sides := maxi(10, int(roundf(sides * 0.72)))
@@ -409,11 +431,10 @@ func _add_loft(parent: Node3D, _label: String, profile: PackedVector4Array, mate
 			surface.add_vertex(p11)
 	surface.index()
 	surface.generate_normals()
-	var committed := surface.commit()
-	_get_batch(parent, material).append_from(committed, 0, Transform3D.IDENTITY)
+	_append_colored_mesh(parent, surface.commit(), Transform3D.IDENTITY, spec)
 
 
-func _add_segment(parent: Node3D, start: Vector3, finish: Vector3, radius_start: float, radius_finish: float, material: Material) -> void:
+func _add_segment(parent: Node3D, start: Vector3, finish: Vector3, radius_start: float, radius_finish: float, spec: Dictionary) -> void:
 	var direction := finish - start
 	if direction.length_squared() < 0.000001:
 		return
@@ -424,10 +445,10 @@ func _add_segment(parent: Node3D, start: Vector3, finish: Vector3, radius_start:
 	cylinder.radial_segments = 6 if maxf(radius_start, radius_finish) < 0.025 else 8
 	cylinder.rings = 1
 	var xform := Transform3D(Basis(Quaternion(Vector3.UP, direction.normalized())), (start + finish) * 0.5)
-	_append_primitive(parent, cylinder, xform, material)
+	_append_colored_mesh(parent, cylinder, xform, spec)
 
 
-func _add_ellipsoid(parent: Node3D, _label: String, center: Vector3, radii: Vector3, material: Material) -> void:
+func _add_ellipsoid(parent: Node3D, _label: String, center: Vector3, radii: Vector3, spec: Dictionary) -> void:
 	var sphere := SphereMesh.new()
 	sphere.radius = 1.0
 	sphere.height = 2.0
@@ -435,10 +456,10 @@ func _add_ellipsoid(parent: Node3D, _label: String, center: Vector3, radii: Vect
 	sphere.radial_segments = 8 if max_r < 0.05 else 10
 	sphere.rings = 5 if max_r < 0.05 else 6
 	var xform := Transform3D(Basis.from_scale(radii), center)
-	_append_primitive(parent, sphere, xform, material)
+	_append_colored_mesh(parent, sphere, xform, spec)
 
 
-func _add_foot(parent: Node3D, material: Material) -> Node3D:
+func _add_foot(parent: Node3D, spec: Dictionary) -> Node3D:
 	var ankle := _make_pivot(parent, Vector3(0.0, -0.31, 0.0), "Ankle")
 	var foot := CapsuleMesh.new()
 	foot.radius = FOOT_RADIUS
@@ -446,18 +467,18 @@ func _add_foot(parent: Node3D, material: Material) -> Node3D:
 	foot.radial_segments = 8
 	foot.rings = 4
 	var xform := Transform3D(Basis(Vector3.RIGHT, PI * 0.5), Vector3(0.0, 0.0, FOOT_CENTER))
-	_append_primitive(ankle, foot, xform, material)
+	_append_colored_mesh(ankle, foot, xform, spec)
 	return ankle
-func _add_hand(parent: Node3D, wrist: Vector3, material: Material) -> void:
+func _add_hand(parent: Node3D, wrist: Vector3, spec: Dictionary) -> void:
 	var palm_end := wrist + Vector3(0.0, -0.050, 0.030)
-	_add_segment(parent, wrist, palm_end, 0.030, 0.025, material)
+	_add_segment(parent, wrist, palm_end, 0.030, 0.025, spec)
 	for finger in range(4):
 		var spread := (float(finger) - 1.5) * 0.014
 		var start := palm_end + Vector3(spread, -0.008, 0.0)
 		var finish := start + Vector3(spread * 0.25, -0.061 + absf(spread) * 0.5, 0.009)
-		_add_segment(parent, start, finish, 0.008, 0.005, material)
+		_add_segment(parent, start, finish, 0.008, 0.005, spec)
 	var thumb_start := palm_end + Vector3(0.025, 0.010, 0.0)
-	_add_segment(parent, thumb_start, thumb_start + Vector3(0.032, -0.032, 0.016), 0.010, 0.006, material)
+	_add_segment(parent, thumb_start, thumb_start + Vector3(0.032, -0.032, 0.016), 0.010, 0.006, spec)
 
 func _make_pivot(parent: Node3D, local_position: Vector3, label: String) -> Node3D:
 	var pivot := Node3D.new()
