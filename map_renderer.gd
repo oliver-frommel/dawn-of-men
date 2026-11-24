@@ -1058,7 +1058,7 @@ func draw_actor_shadows(
 	var player_position: Vector2 = player_actor["position"]
 	if map_view.grow(65.0).has_point(world_to_screen.call(player_position)):
 		var family_size := int(player_actor.get("family_size", 1))
-		var shadow_radii := Vector2(16.0, 5.0) if family_size <= 1 else (Vector2(28.0, 7.0) if family_size == 2 else Vector2(34.0, 8.5))
+		var shadow_radii := Vector2(16.0, 5.0) if family_size <= 1 else Vector2(minf(46.0, 16.0 + float(family_size - 1) * 9.5), minf(10.0, 5.0 + float(family_size - 1) * 1.4))
 		draw_ellipse_shadow(canvas, player_position + Vector2(0.0, 4.0), shadow_radii)
 	for band in ai_bands:
 		var opacity: float = band["opacity"]
@@ -1074,7 +1074,9 @@ func draw_actor_shadows(
 				hring.append(hring[0])
 				var ring_alpha := 0.58 if bool(band.get("pursuing", false)) else 0.30
 				canvas.draw_polyline(hring, Color(0.90, 0.30, 0.22, ring_alpha * opacity), 1.6 if bool(band.get("pursuing", false)) else 1.2, false)
-			draw_ellipse_shadow(canvas, position + Vector2(0.0, 4.0), Vector2(44.0, 9.0), 0.22 * opacity)
+			var b_size := clampi(int(band.get("size", 3)), 1, 4)
+			var b_radii := Vector2(16.0 + float(b_size - 1) * 10.0, 5.5 + float(b_size - 1) * 1.4)
+			draw_ellipse_shadow(canvas, position + Vector2(0.0, 4.0), b_radii, 0.22 * opacity)
 	for animal in wildlife:
 		var position: Vector2 = animal["at"]
 		if animal["opacity"] > 0.0 and map_view.grow(65.0).has_point(world_to_screen.call(position)):
@@ -1125,12 +1127,17 @@ func draw_band_markers(
 	for band in ai_bands:
 		var pos: Vector2 = band["position"]
 		var ground: Vector2 = world_to_screen.call(pos)
-		var label: String = band["label"]
+		var b_size := int(band.get("size", 3))
+		var label := "%s (%d)" % [band["label"], b_size]
 		var attitude := str(band.get("attitude", "friendly"))
+		var is_kin := bool(band.get("is_kin", false))
 		var tint: Color = band["color"]
 		if attitude == "hostile":
 			label += " · hostile"
 			tint = Color("#e36d57")
+		elif is_kin:
+			label += " · kin"
+			tint = Color("#e8c87a")
 		elif attitude == "wary":
 			label += " · wary"
 		var anchor := ground + Vector2(0, -55.0 * zoom_level)
@@ -1138,10 +1145,12 @@ func draw_band_markers(
 		var badge := Rect2(anchor - Vector2(size.x * 0.5 + 5.0, size.y), size + Vector2(10, 4))
 		if not map_view.encloses(badge):
 			continue
-		var bg := Color("#2e1817", 0.92) if attitude == "hostile" else Color("#172421", 0.9)
+		var bg := Color("#2e1817", 0.92) if attitude == "hostile" else (Color("#272c1d", 0.92) if is_kin else Color("#172421", 0.9))
 		canvas.draw_rect(badge, bg)
 		if attitude == "hostile":
 			canvas.draw_rect(badge, Color("#d95b45", 0.85), false, 1.0)
+		elif is_kin:
+			canvas.draw_rect(badge, Color("#d6b262", 0.78), false, 1.0)
 		canvas.draw_string(font, badge.position + Vector2(5.0, font.get_ascent(12) + 2.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, tint.lightened(0.35))
 
 

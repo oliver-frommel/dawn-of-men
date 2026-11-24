@@ -16,7 +16,10 @@ const TRAIL_READING_SPEED_BONUS := 12.0
 const ERECTUS_SPEED_BONUS := 16.0
 const AGING_SPEED_PENALTY := 8.0
 const TRAVEL_ACCELERATION := 260.0
-const PLAYER_COUNT := 3
+const MAX_PLAYER_ADULTS := 4
+const MAX_AI_BAND_SIZE := 4
+const MAX_AI_BANDS := 6
+const PLAYER_COUNT := MAX_PLAYER_ADULTS + 1
 const NEIGHBOR_BAND_SIZE := 3
 const BAND_FADE_IN := 0.5
 const BAND_FADE_OUT := 0.85
@@ -42,7 +45,10 @@ const SUCCESSION_COHESION := 8
 const AGING_RANGE_PENALTY_AGE := 8
 const AGING_COHESION_AGE := 10
 const SHARE_CAMP_FOOD_COST := 4
+const KIN_SHARE_FOOD_COST := 2
 const SHARE_CAMP_COOLDOWN := 4
+const COHESION_HIGH := 70
+const COHESION_LOW := 35
 const BASE_SCOUT_RADIUS := 4
 const TRAIL_READING_SCOUT_RADIUS := 5
 const BASE_PRACTICE_FOOD_COST := 8
@@ -115,9 +121,13 @@ var time_scale := 1.0
 var generation := 1
 var adult_age := 0
 var aging_warned := false
+var band_adults := 1
 var has_mate := false
 var has_child := false
 var child_stage := 0
+var offspring_bands_founded := 0
+var members_joined := 0
+var members_left := 0
 var succession_turn := -1
 var kinship_recorded := false
 var lineage_ended := false
@@ -450,11 +460,12 @@ func _make_actor(tile: Vector2i) -> Dictionary:
 	return {
 		"position": position, "target": position, "heading": Vector2(1, 0),
 		"gait_phase": 0.0, "moving": false, "speed": PLAYER_SPEED, "travel_speed": 0.0,
-		"activity": "idle", "action_time": 0.0, "is_player": false, "route": []
+		"activity": "idle", "action_time": 0.0, "is_player": false, "route": [],
+		"models": []
 	}
 
 
-func _make_ai_band(label: String, start: Vector2i, goals: Array, color: Color, pause: float) -> Dictionary:
+func _make_ai_band(label: String, start: Vector2i, goals: Array, color: Color, pause: float, initial_size := NEIGHBOR_BAND_SIZE, is_kin := false, kin_gen := 0) -> Dictionary:
 	var actor := _make_actor(world.nearest_land_tile(start))
 	actor["label"] = label
 	actor["color"] = color
@@ -468,6 +479,10 @@ func _make_ai_band(label: String, start: Vector2i, goals: Array, color: Color, p
 	actor["pause"] = pause
 	actor["speed"] = 39.0
 	actor["opacity"] = 1.0
+	actor["size"] = clampi(initial_size, 1, MAX_AI_BAND_SIZE)
+	actor["cohesion"] = 80 if is_kin else 65
+	actor["is_kin"] = is_kin
+	actor["kin_generation"] = kin_gen
 	actor["attitude"] = "friendly"
 	actor["skirmish_cooldown"] = 0.0
 	actor["pursuing"] = false
@@ -626,9 +641,21 @@ func _sync_hominin_models(delta := 0.0) -> void:
 		_sync_hominin_band(ai_bands[i], i, false, delta)
 
 
+func _band_slot_offset(slot: int, total: int) -> Vector2:
+	if total <= 1:
+		return Vector2.ZERO
+	if total == 2:
+		return Vector2(-11, 0) if slot == 0 else Vector2(13, -2)
+	if total == 3:
+		return [Vector2(-17, 1), Vector2(0, -4), Vector2(17, 2)][slot % 3]
+	return [Vector2(-21, 2), Vector2(-7, -5), Vector2(8, -4), Vector2(21, 2)][slot % 4]
+
+
 func _sync_hominin_band(actor: Dictionary, band_index: int, player_controlled: bool, delta: float) -> void:
-	var model_offset := 0 if player_controlled else PLAYER_COUNT + band_index * NEIGHBOR_BAND_SIZE
-	var model_count := PLAYER_COUNT if player_controlled else NEIGHBOR_BAND_SIZE
+	var active_adults := band_adults if player_controlled else clampi(int(actor.get("size", NEIGHBOR_BAND_SIZE)), 1, MAX_AI_BAND_SIZE)
+	var model_count := (MAX_PLAYER_ADULTS + 1) if player_controlled else MAX_AI_BAND_SIZE
+	if player_controlled:
+		player_actor["family_size"] = band_adults + (1 if has_child else 0)
 	var current_stage := 0 if turn < 8 else 2
 	var robust := _is_paranthropus_band(band_index)
 	if robust:
@@ -639,55 +666,54 @@ func _sync_hominin_band(actor: Dictionary, band_index: int, player_controlled: b
 	var has_pos := opacity > 0.0 and (live_position or actor["last_seen"] != null)
 	var center: Vector2 = (actor["position"] if live_position else actor["last_seen"]) if has_pos else Vector2.ZERO
 	var band_on_screen := has_pos and MAP_VIEW.grow(150.0 * zoom_level).has_point(_world_to_screen(center))
+	var models: Array = actor["models"]
 	for slot in range(model_count):
-		var model_index := model_offset + slot
-		var person := slot
-		var active_slot := true
+		var is_child_slot := player_controlled and slot == MAX_PLAYER_ADULTS
+		var active_slot := has_child if is_child_slot else (slot < active_adults)
+		if not active_slot:
+			if slot < models.size() and is_instance_valid(models[slot]):
+				models[slot].visible = false
+			continue
 		var slot_scale := 1.0
-		var slot_offset := Vector2((person - 1) * 25, -3 + (person % 2) * 3)
-		var slot_phase_offset := float(person) * TAU / 3.0
+		var slot_offset := _band_slot_offset(slot, active_adults)
+		var slot_phase_offset := float(slot) * 1.9
 		var slot_phase_mult := 1.0
-		var variant := person
-		if player_controlled:
-			if slot == 0:
-				variant = generation % 3
-				slot_offset = Vector2(-10, 0) if has_mate else Vector2.ZERO
-				slot_phase_offset = 0.0
-			elif slot == 1:
-				active_slot = has_mate
-				variant = (generation + 1) % 3
-				slot_offset = Vector2(14, -2)
-				slot_phase_offset = 1.9
-			else:
-				active_slot = has_child
-				variant = (generation + 2) % 3
-				slot_scale = 0.74 if child_stage >= 2 else 0.58
-				var heading_vec: Vector2 = actor["heading"]
-				var trail_dir := -heading_vec.normalized() if heading_vec.length_squared() > 0.01 else Vector2(0.0, 1.0)
-				slot_offset = Vector2(2, 7) + trail_dir * 8.0
-				slot_phase_offset = 3.6
-				slot_phase_mult = 1.35
-		var wrapping := hide_wrap_unlocked and (not (player_controlled and slot == 2)) and (person + band_index) % 2 == 0
+		var variant := (generation + slot) % 3 if player_controlled else ((int(actor.get("kin_generation", 0)) + slot) % 3)
+		if is_child_slot:
+			variant = (generation + 2) % 3
+			slot_scale = 0.74 if child_stage >= 2 else 0.58
+			var heading_vec: Vector2 = actor["heading"]
+			var trail_dir := -heading_vec.normalized() if heading_vec.length_squared() > 0.01 else Vector2(0.0, 1.0)
+			slot_offset = Vector2(2, 8) + trail_dir * 9.0
+			slot_phase_offset = 3.6
+			slot_phase_mult = 1.35
+		var wrapping := hide_wrap_unlocked and (not is_child_slot) and (slot + band_index) % 2 == 0
 		var signature := "%d:%d:%d:%s" % [current_stage, variant, int(robust), str(wrapping)]
-		var model: Node3D
-		if model_index >= hominin_models.size():
+		while models.size() <= slot:
+			models.append(null)
+		var model: Node3D = models[slot]
+		if not is_instance_valid(model):
 			model = HOMININ_MODEL_SCRIPT.new() as Node3D
 			model.configure(current_stage, variant, robust, wrapping, group_color)
 			model.set_meta("model_signature", signature)
+			models[slot] = model
 			hominin_models.append(model)
 			hominin_stage.add_child(model)
 			_request_3d_update()
-		else:
-			model = hominin_models[model_index]
-			if str(model.get_meta("model_signature", "")) != signature:
-				model.queue_free()
-				model = HOMININ_MODEL_SCRIPT.new() as Node3D
-				model.configure(current_stage, variant, robust, wrapping, group_color)
-				model.set_meta("model_signature", signature)
-				hominin_models[model_index] = model
-				hominin_stage.add_child(model)
-				_request_3d_update()
-		if not band_on_screen or not active_slot:
+		elif str(model.get_meta("model_signature", "")) != signature:
+			var old_idx := hominin_models.find(model)
+			model.queue_free()
+			model = HOMININ_MODEL_SCRIPT.new() as Node3D
+			model.configure(current_stage, variant, robust, wrapping, group_color)
+			model.set_meta("model_signature", signature)
+			models[slot] = model
+			if old_idx >= 0:
+				hominin_models[old_idx] = model
+			else:
+				hominin_models.append(model)
+			hominin_stage.add_child(model)
+			_request_3d_update()
+		if not band_on_screen:
 			model.visible = false
 			continue
 		model.set_opacity(opacity)
@@ -964,9 +990,9 @@ func _update_combat_flashes(delta: float) -> bool:
 
 
 func _player_combat_strength(include_flint := true) -> int:
-	var strength := 1
-	if has_mate:
-		strength += MATE_COMBAT_BONUS
+	var strength := 1 + maxi(0, band_adults - 1) * MATE_COMBAT_BONUS
+	if cohesion >= COHESION_HIGH:
+		strength += 1
 	if _has_skill("stone_flaking"):
 		strength += 2
 	if _has_skill("hide_working"):
@@ -983,9 +1009,11 @@ func _player_combat_strength(include_flint := true) -> int:
 
 
 func _band_combat_strength(band_index: int) -> int:
+	var band: Dictionary = ai_bands[band_index]
+	var size_str := clampi(int(band.get("size", NEIGHBOR_BAND_SIZE)), 1, MAX_AI_BAND_SIZE)
 	if _is_paranthropus_band(band_index) or turn >= 18:
-		return 4
-	return 3
+		return size_str + 1
+	return size_str
 
 
 func _check_band_skirmishes() -> void:
@@ -1038,6 +1066,7 @@ func _resolve_band_skirmish(band_index: int, initiated_by_player: bool) -> void:
 		cohesion += cohesion_gain
 		knowledge += knowledge_gain
 		band["attitude"] = "wary"
+		band["cohesion"] = maxi(15, int(band.get("cohesion", 60)) - 18)
 		_spawn_combat_flash(player_pos.lerp(band["position"], 0.4), Color("#e8a84d"))
 		_spawn_floating_text("SKIRMISH WON · +%d Food" % food_gain, player_pos, Color("#f2c872"))
 		_start_player_activity("fighting", 1.2)
@@ -1824,7 +1853,7 @@ func _practice_food_cost(tile: Vector2i) -> int:
 
 
 func _season_food_cost(tile: Vector2i, season_turn: int) -> int:
-	var family_upkeep := (MATE_UPKEEP if has_mate else 0) + (CHILD_UPKEEP if has_child else 0)
+	var family_upkeep := maxi(0, band_adults - 1) * MATE_UPKEEP + (CHILD_UPKEEP if has_child else 0)
 	if season_turn % 2 == 0:
 		return WET_SEASON_FOOD_COST + family_upkeep
 	if world.near_permanent_water(tile):
@@ -2116,29 +2145,62 @@ func _complete_active_task() -> void:
 			var band_index := int(extra.get("band_index", 0))
 			band_shares_completed += 1
 			band_share_ready_turn[band_index] = turn + SHARE_CAMP_COOLDOWN
+			var is_kin_band := false
+			var band_name := "Neighbors"
+			var cost_paid := int(task.get("food_paid", SHARE_CAMP_FOOD_COST))
+			var join_note := ""
+			var gift_note := ""
 			if band_index >= 0 and band_index < ai_bands.size():
-				ai_bands[band_index]["attitude"] = "friendly"
+				var band: Dictionary = ai_bands[band_index]
+				band_name = str(band["label"])
+				is_kin_band = bool(band.get("is_kin", false))
+				band["attitude"] = "friendly"
+				band["cohesion"] = mini(100, int(band.get("cohesion", 65)) + 12)
+				if is_kin_band and food < 20:
+					var before_gift := food
+					_change_food(8.0)
+					var gifted := food - before_gift
+					if gifted > 0:
+						gift_note = " They share +%d food with their elders." % gifted
+				var join_threshold := 45 if is_kin_band else 60
+				if band_adults < MAX_PLAYER_ADULTS and int(band.get("size", 1)) > 1 and cohesion >= join_threshold:
+					band["size"] = int(band["size"]) - 1
+					band_adults += 1
+					members_joined += 1
+					_sync_hominin_models()
+					_request_3d_update()
+					_spawn_floating_text("+1 Member joined band!", player_actor["position"], Color("#9fd4a7"))
+					join_note = " One individual joins your band (now %d)." % band_adults
 			var knowledge_gain := mini(6, 99 - knowledge)
-			var cohesion_gain := mini(4, 100 - cohesion)
+			var cohesion_gain := mini(6 if is_kin_band else 4, 100 - cohesion)
 			knowledge += knowledge_gain
 			cohesion += cohesion_gain
-			var band_name: String = ai_bands[band_index]["label"] if band_index < ai_bands.size() else "Neighbors"
-			_event("SHARED CAMP  /  %s trade trails and stories (now friendly). Food −%d, knowledge +%d, cohesion +%d. %s" % [band_name, SHARE_CAMP_FOOD_COST, knowledge_gain, cohesion_gain, _nearest_undiscovered_landmark_hint()])
+			var header := "KIN GATHERING" if is_kin_band else "SHARED CAMP"
+			_event("%s  /  %s trade trails and stories. Food −%d, knowledge +%d, cohesion +%d.%s%s %s" % [header, band_name, cost_paid, knowledge_gain, cohesion_gain, gift_note, join_note, _nearest_undiscovered_landmark_hint()])
 		"kinship":
 			kinship_recorded = true
 			var cohesion_gain := mini(6, 100 - cohesion)
 			cohesion += cohesion_gain
 			_event("NEANDERTHAL MEETING  /  Two human groups share a refuge. Food −5, cohesion +%d. Shared descendants recorded." % cohesion_gain)
 		"mate":
-			has_mate = true
+			var source_idx := int(extra.get("band_index", -1))
+			var mate_joined_now := false
+			if not has_mate:
+				has_mate = true
+				if band_adults < MAX_PLAYER_ADULTS:
+					band_adults += 1
+					members_joined += 1
+					mate_joined_now = true
+					if source_idx >= 0 and source_idx < ai_bands.size() and int(ai_bands[source_idx].get("size", 1)) > 1:
+						ai_bands[source_idx]["size"] = int(ai_bands[source_idx]["size"]) - 1
 			has_child = true
 			child_stage = 1
-			player_actor["family_size"] = 3
 			succession_turn = turn + SUCCESSION_SEASONS
 			_sync_hominin_models()
 			_request_3d_update()
-			_spawn_floating_text("Mate joined · Offspring born!", player_actor["position"], Color("#f2c5a0"))
-			_event("PAIRING  /  A mate joins your band and an offspring is born. Food −%d (+%d strength, +%d gather; +%d upkeep while raising young). Succession in %d seasons." % [MATING_FOOD_COST, MATE_COMBAT_BONUS, MATE_GATHER_BONUS, MATE_UPKEEP + CHILD_UPKEEP, SUCCESSION_SEASONS])
+			_spawn_floating_text("Mate joined · Offspring born!" if mate_joined_now else "Offspring born!", player_actor["position"], Color("#f2c5a0"))
+			var join_text := "A mate leaves their band to join yours and an offspring is born." if mate_joined_now else "You welcome a new offspring into your band."
+			_event("PAIRING  /  %s Food −%d (band %d + child). Offspring matures in %d seasons." % [join_text, MATING_FOOD_COST, band_adults, SUCCESSION_SEASONS])
 	_refresh_ui()
 	_redraw_dynamic()
 
@@ -2155,6 +2217,17 @@ func _tick_band_attitudes_and_wounds(entering_dry: bool) -> void:
 	var newly_hostile: Array[String] = []
 	for i in range(ai_bands.size()):
 		var band: Dictionary = ai_bands[i]
+		var is_kin := bool(band.get("is_kin", false))
+		var b_coh := int(band.get("cohesion", 65))
+		if entering_dry:
+			b_coh = clampi(b_coh - (4 if is_kin else 10), 10, 100)
+		else:
+			b_coh = clampi(b_coh + 8, 10, 100)
+		band["cohesion"] = b_coh
+		if is_kin:
+			# Offspring kin bands remain favorable to the parent generation.
+			band["attitude"] = "wary" if cohesion < 20 else "friendly"
+			continue
 		if entering_dry:
 			var recently_shared := int(band_share_ready_turn.get(i, 0)) > turn
 			if _is_paranthropus_band(i):
@@ -2170,6 +2243,123 @@ func _tick_band_attitudes_and_wounds(entering_dry: bool) -> void:
 				band["attitude"] = "wary"
 	if not newly_hostile.is_empty():
 		_event("TERRITORIAL TENSION  /  Dry-season scarcity turns %s hostile. Evade them or arm with flint and stone flaking." % ", ".join(newly_hostile))
+
+
+func _tick_band_membership() -> void:
+	# Low social cohesion (or empty food stores) causes individuals to leave your band for nearby groups.
+	if band_adults > 1 and (cohesion < COHESION_LOW or food == 0):
+		band_adults -= 1
+		members_left += 1
+		if band_adults <= 1:
+			has_mate = false
+		var target_idx := -1
+		var best_dist := INF
+		var player_pos: Vector2 = player_actor["position"]
+		for i in range(ai_bands.size()):
+			var b: Dictionary = ai_bands[i]
+			if _is_paranthropus_band(i) or str(b.get("attitude", "friendly")) == "hostile":
+				continue
+			if int(b.get("size", 1)) >= MAX_AI_BAND_SIZE:
+				continue
+			var d := player_pos.distance_squared_to(b["position"])
+			if d < best_dist:
+				best_dist = d
+				target_idx = i
+		var dest_note := "wanders off into the valley"
+		if target_idx >= 0:
+			ai_bands[target_idx]["size"] = int(ai_bands[target_idx]["size"]) + 1
+			dest_note = "joins %s" % ai_bands[target_idx]["label"]
+		_sync_hominin_models()
+		_request_3d_update()
+		_spawn_floating_text("Member left (low cohesion)", player_pos, Color("#e88c72"))
+		_event("BAND STRAIN  /  With low social cohesion (%d), a companion leaves your band and %s (band size %d)." % [cohesion, dest_note, band_adults])
+
+	# Strained AI bands can also shed individuals who join higher-cohesion nearby bands (including yours!).
+	var player_pos: Vector2 = player_actor["position"]
+	for i in range(ai_bands.size()):
+		var band: Dictionary = ai_bands[i]
+		if _is_paranthropus_band(i):
+			continue
+		var b_size := int(band.get("size", 1))
+		var b_coh := int(band.get("cohesion", 65))
+		if b_size <= 1 or b_coh >= 42:
+			continue
+		# Check if player band is nearby and attractive (tight-knit cohesion & room).
+		var pos: Vector2 = band["position"]
+		var can_join_player := (
+			band_adults < MAX_PLAYER_ADULTS
+			and str(band.get("attitude", "friendly")) != "hostile"
+			and cohesion >= COHESION_HIGH
+			and pos.distance_squared_to(player_pos) <= 320.0 * 320.0
+		)
+		if can_join_player:
+			band["size"] = b_size - 1
+			band["cohesion"] = mini(100, b_coh + 12)
+			band_adults += 1
+			members_joined += 1
+			_sync_hominin_models()
+			_request_3d_update()
+			_spawn_floating_text("+1 Wanderer joined!", player_pos, Color("#9fd4a7"))
+			_event("BAND RECRUIT  /  Drawn by your tight-knit cohesion (%d), a member of %s leaves to join your band (size %d)." % [cohesion, band["label"], band_adults])
+			continue
+		# Otherwise transfer to the nearest higher-cohesion AI band with room.
+		var best_other := -1
+		var best_d := INF
+		for j in range(ai_bands.size()):
+			if j == i or _is_paranthropus_band(j):
+				continue
+			var other: Dictionary = ai_bands[j]
+			if int(other.get("size", 1)) >= MAX_AI_BAND_SIZE or int(other.get("cohesion", 50)) <= b_coh + 5:
+				continue
+			var d := pos.distance_squared_to(other["position"])
+			if d < best_d:
+				best_d = d
+				best_other = j
+		if best_other >= 0:
+			band["size"] = b_size - 1
+			band["cohesion"] = mini(100, b_coh + 10)
+			ai_bands[best_other]["size"] = int(ai_bands[best_other]["size"]) + 1
+			_sync_hominin_models()
+
+
+func _spawn_offspring_band() -> Dictionary:
+	var origin_tile: Vector2i = world.tile_from_world(player_actor["position"])
+	# If band cap reached, reinforce an existing kin band instead of unbounded spawning.
+	if ai_bands.size() >= MAX_AI_BANDS:
+		for b in ai_bands:
+			if bool(b.get("is_kin", false)):
+				b["size"] = mini(MAX_AI_BAND_SIZE, int(b.get("size", 2)) + 1)
+				b["cohesion"] = 88
+				b["attitude"] = "friendly"
+				_sync_hominin_models()
+				return b
+	var start_tile := origin_tile
+	for step in [Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(0, -1), Vector2i(1, 1), Vector2i(-1, 1)]:
+		var cand: Vector2i = origin_tile + step
+		if world.has_land_route_point(cand):
+			start_tile = cand
+			break
+	# Generate a 4-waypoint roaming loop across nearby Rift Valley land tiles.
+	var goals: Array[Vector2i] = [start_tile]
+	var offsets := [Vector2i(6, -4), Vector2i(9, 4), Vector2i(2, 8), Vector2i(-5, 3)]
+	for off in offsets:
+		var rotated := Vector2i(off.x if offspring_bands_founded % 2 == 0 else -off.x, off.y)
+		var raw := (start_tile + rotated).clamp(Vector2i(2, 2), Vector2i(WORLD_MAP_SCRIPT.WORLD_WIDTH - 3, WORLD_MAP_SCRIPT.WORLD_HEIGHT - 3))
+		var target := world.nearest_land_tile(raw)
+		if world.has_land_route_point(target) and target not in goals:
+			goals.append(target)
+	if goals.size() < 2:
+		goals.append(world.nearest_land_tile(WORLD_MAP_SCRIPT.WORLD_START))
+	offspring_bands_founded += 1
+	var label := "Gen %d Kin" % generation
+	var kin_band := _make_ai_band(label, start_tile, goals, Color("#d8b666"), 0.5, 2, true, generation)
+	ai_bands.append(kin_band)
+	var new_idx := ai_bands.size() - 1
+	met_bands[new_idx] = true
+	_route_actor_to(kin_band, goals[1 % goals.size()])
+	_sync_hominin_models()
+	_request_3d_update()
+	return kin_band
 
 
 func _advance_season() -> void:
@@ -2197,12 +2387,15 @@ func _advance_season() -> void:
 	if _has_skill("windbreaks") and (world.terrain_at(tile) == "highland" or tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE):
 		low_food_penalty = WINDBREAKS_LOW_FOOD_COHESION_PENALTY
 	var cohesion_delta := 2 if food > 25 else (low_food_penalty if food > 0 else STARVATION_COHESION_PENALTY)
+	if band_adults >= 3 and food <= 25:
+		cohesion_delta -= 1
 	cohesion = clampi(cohesion + cohesion_delta, 0, 100)
 	if entering_dry and inland and _has_skill("hide_working"):
 		cohesion = clampi(cohesion + 2, 0, 100)
 	if carried_ember_seasons > 0:
 		cohesion = clampi(cohesion + 1, 0, 100)
 	_complete_succession()
+	_tick_band_membership()
 	if adult_age >= AGING_COHESION_AGE and succession_turn < 0 and turn < CHRONICLE_TURNS:
 		cohesion = maxi(0, cohesion - 2)
 		if not aging_warned:
@@ -2306,8 +2499,8 @@ func _forage_food_gain(tile: Vector2i) -> int:
 	if fire_state == "burning":
 		return 0
 	if yield_on_terrain > 0:
-		if has_mate:
-			yield_on_terrain += MATE_GATHER_BONUS
+		if band_adults > 1:
+			yield_on_terrain += (band_adults - 1) * MATE_GATHER_BONUS
 		if not is_dry and _has_skill("plant_lore") and terrain in ["woodland", "wetland"]:
 			yield_on_terrain += 4
 		if is_dry and _has_skill("food_drying") and not world.near_permanent_water(tile):
@@ -2330,8 +2523,8 @@ func _scavenge_food_gain(tile: Vector2i) -> int:
 
 func _hunt_food_gain() -> int:
 	var base := HUNT_COOPERATIVE_FOOD if turn >= 25 else HUNT_BASE_FOOD
-	if has_mate:
-		base += MATE_GATHER_BONUS
+	if band_adults > 1:
+		base += (band_adults - 1) * MATE_GATHER_BONUS
 	if int(pack["stone"]) > 0:
 		base += 6
 	return mini(base, 100 - food)
@@ -2418,26 +2611,34 @@ func _on_learn_skill(skill_id: String) -> void:
 
 func _nearby_hostile_band() -> int:
 	var position: Vector2 = player_actor["position"]
+	var best_idx := -1
+	var best_dist := MATE_RANGE * MATE_RANGE
 	for i in range(ai_bands.size()):
 		if str(ai_bands[i].get("attitude", "friendly")) != "hostile":
 			continue
 		if float(ai_bands[i].get("skirmish_cooldown", 0.0)) > 0.0:
 			continue
 		var band_position: Vector2 = ai_bands[i]["position"]
-		if position.distance_squared_to(band_position) <= MATE_RANGE * MATE_RANGE and world.land_segment_clear(position, band_position):
-			return i
-	return -1
+		var d := position.distance_squared_to(band_position)
+		if d <= best_dist and world.land_segment_clear(position, band_position):
+			best_dist = d
+			best_idx = i
+	return best_idx
 
 
 func _nearby_shareable_band() -> int:
 	var position: Vector2 = player_actor["position"]
+	var best_idx := -1
+	var best_dist := MATE_RANGE * MATE_RANGE
 	for i in range(ai_bands.size()):
 		if _is_paranthropus_band(i) or str(ai_bands[i].get("attitude", "friendly")) == "hostile":
 			continue
 		var band_position: Vector2 = ai_bands[i]["position"]
-		if position.distance_squared_to(band_position) <= MATE_RANGE * MATE_RANGE and world.land_segment_clear(position, band_position):
-			return i
-	return -1
+		var d := position.distance_squared_to(band_position)
+		if d <= best_dist and world.land_segment_clear(position, band_position):
+			best_dist = d
+			best_idx = i
+	return best_idx
 
 
 func _nearest_undiscovered_landmark_hint() -> String:
@@ -2462,6 +2663,12 @@ func _nearest_undiscovered_landmark_hint() -> String:
 	return "They speak of %s to the %s." % [best["name"], compass]
 
 
+func _share_cost_for_band(band_index: int) -> int:
+	if band_index >= 0 and band_index < ai_bands.size() and bool(ai_bands[band_index].get("is_kin", false)):
+		return KIN_SHARE_FOOD_COST
+	return SHARE_CAMP_FOOD_COST
+
+
 func _on_encounter() -> void:
 	if not _season_action_blocker().is_empty():
 		return
@@ -2473,8 +2680,9 @@ func _on_encounter() -> void:
 		if not _share_camp_blocker().is_empty():
 			return
 		var band_index := _nearby_shareable_band()
-		_change_food(-float(SHARE_CAMP_FOOD_COST))
-		_start_task("share", "meeting", TASK_SHARE_DURATION, {"food_paid": float(SHARE_CAMP_FOOD_COST), "band_index": band_index})
+		var share_cost := _share_cost_for_band(band_index)
+		_change_food(-float(share_cost))
+		_start_task("share", "meeting", TASK_SHARE_DURATION, {"food_paid": float(share_cost), "band_index": band_index})
 		return
 	if not _kinship_blocker().is_empty():
 		return
@@ -2489,8 +2697,9 @@ func _share_camp_blocker() -> String:
 	var ready_turn := int(band_share_ready_turn.get(band_index, 0))
 	if turn < ready_turn:
 		return "Shared recently — return in %d season(s)." % (ready_turn - turn)
-	if food < SHARE_CAMP_FOOD_COST:
-		return "Sharing camp requires %d food." % SHARE_CAMP_FOOD_COST
+	var share_cost := _share_cost_for_band(band_index)
+	if food < share_cost:
+		return "Sharing camp requires %d food." % share_cost
 	return ""
 
 
@@ -2504,22 +2713,30 @@ func _kinship_blocker() -> String:
 	return ""
 
 
-func _has_nearby_mate() -> bool:
+func _nearby_mate_band() -> int:
 	var position: Vector2 = player_actor["position"]
+	var best_idx := -1
+	var best_dist := MATE_RANGE * MATE_RANGE
 	for i in range(ai_bands.size()):
 		if _is_paranthropus_band(i) or str(ai_bands[i].get("attitude", "friendly")) == "hostile":
 			continue
 		var band_position: Vector2 = ai_bands[i]["position"]
-		if position.distance_squared_to(band_position) <= MATE_RANGE * MATE_RANGE and world.land_segment_clear(position, band_position):
-			return true
-	return false
+		var d := position.distance_squared_to(band_position)
+		if d <= best_dist and world.land_segment_clear(position, band_position):
+			best_dist = d
+			best_idx = i
+	return best_idx
+
+
+func _has_nearby_mate() -> bool:
+	return _nearby_mate_band() >= 0
 
 
 func _mating_blocker() -> String:
 	if succession_turn >= 0:
-		return "Succession in %d season(s)." % (succession_turn - turn)
+		return "Offspring matures in %d season(s)." % (succession_turn - turn)
 	if turn + SUCCESSION_SEASONS > CHRONICLE_TURNS:
-		return "There are too few seasons left for succession."
+		return "There are too few seasons left for offspring to mature."
 	if not _has_nearby_mate():
 		return "Approach an eligible neighboring band to find a mate."
 	if food < MATING_FOOD_COST:
@@ -2530,8 +2747,9 @@ func _mating_blocker() -> String:
 func _on_mate() -> void:
 	if not _season_action_blocker().is_empty() or not _mating_blocker().is_empty():
 		return
+	var source_idx := _nearby_mate_band()
 	_change_food(-float(MATING_FOOD_COST))
-	_start_task("mate", "pairing", TASK_MATE_DURATION, {"food_paid": float(MATING_FOOD_COST)})
+	_start_task("mate", "pairing", TASK_MATE_DURATION, {"food_paid": float(MATING_FOOD_COST), "band_index": source_idx})
 
 
 func _complete_succession() -> void:
@@ -2547,16 +2765,15 @@ func _complete_succession() -> void:
 	generation += 1
 	adult_age = 0
 	aging_warned = false
-	has_mate = false
 	has_child = false
 	child_stage = 0
-	player_actor["family_size"] = 1
 	var cohesion_gain := mini(SUCCESSION_COHESION, 100 - cohesion)
 	cohesion += cohesion_gain
+	var kin_band := _spawn_offspring_band()
 	_sync_hominin_models()
 	_request_3d_update()
-	_spawn_floating_text("Generation %d · New Adult!" % generation, player_actor["position"], Color("#f2d594"))
-	_event("SUCCESSION  /  Your grown offspring steps forward to lead the next generation. Generation %d, cohesion +%d." % [generation, cohesion_gain])
+	_spawn_floating_text("Gen %d · %s sets out!" % [generation, kin_band["label"]], player_actor["position"], Color("#f2d594"))
+	_event("OFFSPRING DISPERSAL  /  Your grown offspring forms a new roaming band (%s, favorable to your elders). Generation %d, cohesion +%d." % [kin_band["label"], generation, cohesion_gain])
 
 
 func _event(text: String) -> void:
@@ -2591,16 +2808,11 @@ func _period_name() -> String:
 func _refresh_stats_bar() -> void:
 	if not is_instance_valid(stats_label):
 		return
-	var gen_tags: Array[String] = [str(generation)]
-	if has_mate and has_child:
-		gen_tags.append("family")
-	elif has_mate:
-		gen_tags.append("pair")
-	if adult_age >= AGING_RANGE_PENALTY_AGE:
-		gen_tags.append("aging")
-	var gen_text := " · ".join(gen_tags)
-	var wound_tag := "   ◇   WOUNDED" if wounded_seasons > 0 else ""
-	stats_label.text = "FOOD   %d   ◇   KNOWLEDGE   %d   ◇   COHESION   %d   ◇   GEN   %s%s" % [food, knowledge, cohesion, gen_text, wound_tag]
+	var coh_tag := " · tight" if cohesion >= COHESION_HIGH else (" · strained" if cohesion < COHESION_LOW else "")
+	var band_text := "%d+child" % band_adults if has_child else str(band_adults)
+	var gen_text := "%d · aging" % generation if adult_age >= AGING_RANGE_PENALTY_AGE else str(generation)
+	var wound_tag := "  ◇  WOUNDED" if wounded_seasons > 0 else ""
+	stats_label.text = "FOOD %d  ◇  KNOW %d  ◇  COHESION %d%s  ◇  BAND %s  ◇  GEN %s%s" % [food, knowledge, cohesion, coh_tag, band_text, gen_text, wound_tag]
 
 
 func _refresh_ui() -> void:
@@ -2727,12 +2939,24 @@ func _refresh_action_label() -> void:
 			kinship_button.disabled = not blocker.is_empty()
 			kinship_button.tooltip_text = blocker if not blocker.is_empty() else "Engage %s in a skirmish (your strength %d vs %d). Victory seizes +14 food; defeat risks a raid & wound." % [ai_bands[hostile_idx]["label"], p_str, e_str]
 		else:
+			var share_idx := _nearby_shareable_band()
+			var share_cost := _share_cost_for_band(share_idx)
+			var is_kin := share_idx >= 0 and bool(ai_bands[share_idx].get("is_kin", false))
+			var join_threshold := 45 if is_kin else 60
+			var will_recruit := share_idx >= 0 and band_adults < MAX_PLAYER_ADULTS and int(ai_bands[share_idx].get("size", 1)) > 1 and cohesion >= join_threshold
 			var share_blocker := _share_camp_blocker()
-			kinship_button.text = "Share −%d" % SHARE_CAMP_FOOD_COST
+			if is_kin:
+				kinship_button.text = "Kin +Join" if will_recruit else "Kin −%d" % share_cost
+			else:
+				kinship_button.text = "Share +Join" if will_recruit else "Share −%d" % share_cost
 			kinship_button.disabled = not blocker.is_empty() or not share_blocker.is_empty()
 			kinship_button.tooltip_text = blocker if not blocker.is_empty() else share_blocker
 			if kinship_button.tooltip_text.is_empty():
-				kinship_button.tooltip_text = "Share %d food with a nearby band for +6 knowledge, +4 cohesion, calm tensions, and a landmark tip." % SHARE_CAMP_FOOD_COST
+				var join_hint := " One member will join your band!" if will_recruit else (" Raise cohesion to %d+ to recruit a member." % join_threshold if band_adults < MAX_PLAYER_ADULTS else "")
+				if is_kin:
+					kinship_button.tooltip_text = "Gather with your offspring kin band (−%d food) for +6 knowledge, +6 cohesion, and a landmark tip.%s" % [share_cost, join_hint]
+				else:
+					kinship_button.tooltip_text = "Share %d food with a nearby band for +6 knowledge, +4 cohesion, calm tensions, and a landmark tip.%s" % [share_cost, join_hint]
 	else:
 		var kinship_blocker := _kinship_blocker()
 		kinship_button.text = "Meet kin"
@@ -2779,12 +3003,12 @@ func _refresh_skills_panel() -> void:
 
 
 func _refresh_mate_button(action_blocker: String) -> void:
-	mate_button.text = "Heir in %d" % (succession_turn - turn) if succession_turn >= 0 else "Find mate"
+	mate_button.text = "Child %d" % (succession_turn - turn) if succession_turn >= 0 else "Find mate"
 	var blocker := action_blocker
 	if not _run_ended() and (succession_turn >= 0 or blocker.is_empty()):
 		blocker = _mating_blocker()
 	mate_button.disabled = not blocker.is_empty()
-	mate_button.tooltip_text = blocker if mate_button.disabled else "Spend %d food (%.1fs) to pair. A mate joins you (+%d strength, +%d gather) and you raise an offspring (+%d upkeep) for %d seasons." % [MATING_FOOD_COST, TASK_MATE_DURATION, MATE_COMBAT_BONUS, MATE_GATHER_BONUS, MATE_UPKEEP + CHILD_UPKEEP, SUCCESSION_SEASONS]
+	mate_button.tooltip_text = blocker if mate_button.disabled else "Spend %d food (%.1fs) to pair. A mate joins your band (+%d strength, +%d gather) and your offspring buds off as a favorable roaming kin band in %d seasons." % [MATING_FOOD_COST, TASK_MATE_DURATION, MATE_COMBAT_BONUS, MATE_GATHER_BONUS, SUCCESSION_SEASONS]
 
 
 func _refresh_season_bar(tile: Vector2i) -> void:
