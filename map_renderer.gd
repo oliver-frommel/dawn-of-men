@@ -1114,6 +1114,20 @@ func draw_player_marker(
 	var activity: String = player_actor["activity"]
 	if activity != "idle":
 		_draw_player_activity(canvas, center, activity, ai_bands, task_progress)
+	var hp: int = int(player_actor.get("health", 100))
+	var wounded: bool = bool(player_actor.get("wounded", false))
+	if hp < 100 or wounded:
+		var bar_w := 48.0
+		var bar_h := 5.0
+		var bx := center.x - bar_w * 0.5
+		var by := center.y - 78.0
+		var frac := clampf(float(hp) / 100.0, 0.0, 1.0)
+		var fill_col := Color("#5ba176") if hp >= 65 else (Color("#d49a45") if hp >= 35 else Color("#e04a3a"))
+		canvas.draw_rect(Rect2(bx - 1.0, by - 1.0, bar_w + 2.0, bar_h + 2.0), Color("#0e1715", 0.92))
+		if frac > 0.0:
+			canvas.draw_rect(Rect2(bx, by, bar_w * frac, bar_h), fill_col)
+		if wounded:
+			canvas.draw_rect(Rect2(bx - 1.0, by - 1.0, bar_w + 2.0, bar_h + 2.0), Color("#e05a47", 0.85), false, 1.0)
 
 
 func draw_band_markers(

@@ -49,6 +49,10 @@ const KIN_SHARE_FOOD_COST := 2
 const SHARE_CAMP_COOLDOWN := 4
 const COHESION_HIGH := 70
 const COHESION_LOW := 35
+const MAX_HEALTH := 100
+const AGING_FRAIL_AGE := 12
+const AGING_MORTAL_AGE := 14
+const STARVATION_HEALTH_PENALTY := 18
 const BASE_SCOUT_RADIUS := 4
 const TRAIL_READING_SCOUT_RADIUS := 5
 const BASE_PRACTICE_FOOD_COST := 8
@@ -137,6 +141,9 @@ var food := 68
 var food_f := 68.0
 var knowledge := 12
 var cohesion := 57
+var health := MAX_HEALTH
+var death_cause := ""
+var deaths_in_band := 0
 var active_task: Dictionary = {}
 var discovered: Array[int] = [0]
 var learned_skills: Dictionary = {}
@@ -167,6 +174,10 @@ var hide_wrap_unlocked := false
 var bold_font: FontVariation
 var ui_layer: CanvasLayer
 var stats_label: Label
+var health_bar_bg: ColorRect
+var health_bar_fill: ColorRect
+var health_bar_label: Label
+var health_status_label: Label
 var age_label: Label
 var period_label: Label
 var species_label: Label
@@ -229,6 +240,8 @@ func _ready() -> void:
 	map_renderer = MAP_RENDERER_SCRIPT.new(world)
 	player_actor = _make_actor(WORLD_MAP_SCRIPT.WORLD_START)
 	player_actor["is_player"] = true
+	player_actor["health"] = health
+	player_actor["wounded"] = false
 	ai_bands = [
 		_make_ai_band("Western roamers", Vector2i(12, 15), [Vector2i(12, 15), Vector2i(7, 18), Vector2i(10, 21), Vector2i(15, 17), Vector2i(12, 15)], Color("#d78166"), 0.8),
 		_make_ai_band("Northern roamers", Vector2i(21, 9), [Vector2i(21, 9), Vector2i(25, 4), Vector2i(29, 10), Vector2i(26, 17), Vector2i(21, 9)], Color("#7799b9"), 1.6),
@@ -287,6 +300,117 @@ func _change_food(delta_amount: float) -> void:
 	if absf(food_f - float(food)) >= 1.0:
 		food_f = float(food)
 	_set_food(food_f + delta_amount)
+
+
+func _change_health(delta_hp: int, cause := "") -> void:
+	if _run_ended():
+		return
+	health = clampi(health + delta_hp, 0, MAX_HEALTH)
+	player_actor["health"] = health
+	player_actor["wounded"] = wounded_seasons > 0
+	if health <= 0:
+		_handle_death(cause if not cause.is_empty() else "hardship")
+	else:
+		_refresh_stats_bar()
+
+
+func _handle_death(cause: String) -> void:
+	if _run_ended():
+		return
+	deaths_in_band += 1
+	var player_pos: Vector2 = player_actor["position"]
+	_spawn_combat_flash(player_pos, Color("#d93829"))
+	# 1. If companions remain in your band, one dies while the band survives.
+	if band_adults > 1:
+		band_adults -= 1
+		if band_adults <= 1:
+			has_mate = false
+		health = 45
+		wounded_seasons = maxi(wounded_seasons, 1)
+		cohesion = maxi(0, cohesion - 10)
+		player_actor["health"] = health
+		player_actor["wounded"] = true
+		_sync_hominin_models()
+		_request_3d_update()
+		_spawn_floating_text("BAND MEMBER DIED!", player_pos, Color("#f26d5b"))
+		_event("DEATH  /  A member of your band succumbs to %s. Survivors press on (band %d, HP 45, cohesion −10)." % [cause, band_adults])
+		if cohesion == 0:
+			_end_lineage_by_death(cause + " and collapse of cohesion")
+		else:
+			_refresh_ui()
+			_redraw_dynamic()
+		return
+	# 2. If solo, check if a living offspring kin band can carry the lineage forward!
+	var kin_idx := -1
+	for i in range(ai_bands.size() - 1, -1, -1):
+		if bool(ai_bands[i].get("is_kin", false)) and int(ai_bands[i].get("size", 0)) > 0:
+			kin_idx = i
+			break
+	if kin_idx >= 0:
+		var kin: Dictionary = ai_bands[kin_idx]
+		var kin_name: String = str(kin["label"])
+		var kin_pos: Vector2 = kin["position"]
+		var kin_size := clampi(int(kin.get("size", 2)), 1, MAX_PLAYER_ADULTS)
+		var kin_coh := clampi(int(kin.get("cohesion", 70)), 45, 100)
+		var kin_gen := maxi(generation + 1, int(kin.get("kin_generation", generation + 1)))
+		for m in kin.get("models", []):
+			if is_instance_valid(m):
+				hominin_models.erase(m)
+				m.queue_free()
+		ai_bands.remove_at(kin_idx)
+		band_share_ready_turn.clear()
+		met_bands.clear()
+		_cancel_active_task(false)
+		movement_key = KEY_NONE
+		player_actor["position"] = kin_pos
+		player_actor["target"] = kin_pos
+		player_actor["route"] = []
+		band_adults = kin_size
+		has_mate = band_adults >= 2
+		has_child = false
+		child_stage = 0
+		succession_turn = -1
+		generation = kin_gen
+		adult_age = 0
+		aging_warned = false
+		health = 85
+		wounded_seasons = 0
+		cohesion = maxi(cohesion, kin_coh)
+		player_actor["health"] = health
+		player_actor["wounded"] = false
+		_reveal_around(world.tile_from_world(kin_pos), 2)
+		_follow_player_camera()
+		_sync_map_transform()
+		_sync_hominin_models()
+		_position_wildlife_models()
+		_request_3d_update()
+		_spawn_floating_text("Elder died · Continuing as %s!" % kin_name, kin_pos, Color("#f2c872"))
+		_event("DEATH & CONTINUITY  /  Your elder falls to %s, but your offspring band (%s) carries the lineage forward! Band %d, HP 85." % [cause, kin_name, band_adults])
+		_refresh_ui()
+		_redraw_dynamic()
+		return
+	# 3. Solo with no surviving kin band: permanent lineage death.
+	_end_lineage_by_death(cause)
+
+
+func _end_lineage_by_death(cause: String) -> void:
+	lineage_ended = true
+	death_cause = cause
+	health = 0
+	player_actor["health"] = 0
+	player_actor["wounded"] = false
+	_cancel_active_task(false)
+	movement_key = KEY_NONE
+	player_actor["route"] = []
+	for m in player_actor.get("models", []):
+		if is_instance_valid(m):
+			m.visible = false
+	_request_3d_update()
+	_spawn_floating_text("PERISHED · %s" % cause.capitalize(), player_actor["position"], Color("#f26455"))
+	_event("DEATH  /  You perish from %s. With no surviving kin band, your lineage ends in the Rift Valley." % cause)
+	_refresh_ui()
+	_show_summary_overlay()
+	_redraw_dynamic()
 
 
 func _process(delta: float) -> void:
@@ -1077,18 +1201,17 @@ func _resolve_band_skirmish(band_index: int, initiated_by_player: bool) -> void:
 		_change_food(-10.0)
 		cohesion = maxi(0, cohesion - 6)
 		band["attitude"] = "hostile"
+		var raid_dmg := 16 if _has_skill("hide_working") else 24
 		var wounded_note := ""
 		if not _has_skill("hide_working"):
 			wounded_seasons = maxi(wounded_seasons, 2)
-			wounded_note = " Wounded!"
+			wounded_note = " · Wounded"
 		_spawn_combat_flash(player_pos, Color("#e04a3a"))
-		_spawn_floating_text("RAIDED · −10 Food%s" % wounded_note, player_pos, Color("#f07664"))
-		_event("TERRITORIAL RAID  /  %s overpower you in a sharp clash! Food −10, cohesion −6.%s" % [band_name, " You suffer a wound (slower travel)." if not wounded_note.is_empty() else " Hide wraps soften the blows."])
-		if cohesion == 0:
-			lineage_ended = true
-			player_actor["route"] = []
-			_event("LINEAGE LOST  /  Broken by territorial conflict, your band scatters across the valley.")
-			_show_summary_overlay()
+		_spawn_floating_text("RAIDED · −%d HP · −10 Food%s" % [raid_dmg, wounded_note], player_pos, Color("#f07664"))
+		_event("TERRITORIAL RAID  /  %s overpower you in a sharp clash! Health −%d, food −10, cohesion −6.%s" % [band_name, raid_dmg, " You suffer a wound (slower travel)." if not wounded_note.is_empty() else " Hide wraps soften the blows."])
+		_change_health(-raid_dmg, "a raid by %s" % band_name)
+		if not lineage_ended and cohesion == 0:
+			_end_lineage_by_death("territorial defeat and collapse of cohesion")
 	_refresh_ui()
 	_redraw_dynamic()
 
@@ -1156,14 +1279,13 @@ func _check_predator_encounters() -> void:
 			_change_food(-6.0)
 			cohesion = maxi(0, cohesion - 6)
 			wounded_seasons = maxi(wounded_seasons, 2)
+			var maul_dmg := 20 if _has_skill("hide_working") else 28
 			_spawn_combat_flash(player_pos, Color("#e04a3a"))
-			_spawn_floating_text("MAULED · −6 Food · Wounded!", player_pos, Color("#f07664"))
-			_event("PREDATOR AMBUSH  /  A %s lunges from cover! You escape wounded. Food −6, cohesion −6." % pred_name)
-			if cohesion == 0:
-				lineage_ended = true
-				player_actor["route"] = []
-				_event("LINEAGE LOST  /  Shaken and scattered by predators, your band cannot hold together.")
-				_show_summary_overlay()
+			_spawn_floating_text("MAULED · −%d HP · Wounded!" % maul_dmg, player_pos, Color("#f07664"))
+			_event("PREDATOR AMBUSH  /  A %s lunges from cover! You escape wounded. Health −%d, food −6, cohesion −6." % [pred_name, maul_dmg])
+			_change_health(-maul_dmg, "a %s mauling" % pred_name)
+			if not lineage_ended and cohesion == 0:
+				_end_lineage_by_death("predator attacks")
 		_refresh_ui()
 		_redraw_dynamic()
 		return
@@ -1369,12 +1491,18 @@ func _check_collectible_pickups() -> bool:
 				var gain := food - before_food
 				if before_food < 45:
 					cohesion = mini(100, cohesion + 1)
+				var hp_before := health
+				_change_health(14)
+				var hp_gain := health - hp_before
 				var heal_note := ""
 				if wounded_seasons > 0:
 					wounded_seasons = maxi(0, wounded_seasons - 1)
-					heal_note = " · Healing"
-				_spawn_floating_text("+%d Food · Wild Figs%s" % [gain, heal_note], at, Color("#b6dc8b"))
-				_show_toast("Collected wild figs (food +%d%s)." % [gain, ", eases wounds" if not heal_note.is_empty() else ""])
+					player_actor["wounded"] = wounded_seasons > 0
+					heal_note = " · Wounds eased"
+				if hp_gain > 0:
+					heal_note = " · +%d HP%s" % [hp_gain, heal_note]
+				_spawn_floating_text("+%d Food%s · Wild Figs" % [gain, heal_note], at, Color("#b6dc8b"))
+				_show_toast("Collected wild figs (food +%d%s)." % [gain, heal_note])
 			"stone":
 				pack["stone"] = int(pack["stone"]) + 1
 				var k_gain := mini(2, 99 - knowledge)
@@ -1594,7 +1722,12 @@ func _build_ui() -> void:
 	age_label = _label(root, "3.2 Ma", Rect2(278, 8, 142, 30), 22, Color("#f0e6d1"), true)
 	period_label = _label(root, "THE LATE PLIOCENE", Rect2(280, 42, 190, 15), 8, Color("#92a197"), true)
 	species_label = _label(root, "", Rect2(470, 9, 260, 48), 10, Color("#efe2ca"), true)
-	stats_label = _label(root, "", Rect2(748, 21, 670, 32), 11, Color("#e8dfce"), false)
+	stats_label = _label(root, "", Rect2(748, 8, 676, 24), 10, Color("#e8dfce"), false)
+	health_bar_bg = _panel(root, Rect2(748, 38, 224, 20), Color("#111b19"), Color("#657767"))
+	health_bar_fill = _panel(root, Rect2(749, 39, 222, 18), Color("#5ba176"))
+	health_bar_label = _label(root, "HP 100 · HEALTHY", Rect2(748, 37, 224, 22), 8, Color("#f6efe0"), true)
+	health_bar_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	health_status_label = _label(root, "", Rect2(984, 39, 440, 20), 9, Color("#b9c4b8"), false)
 
 	# One fixed chronicle is the only sidebar; the rest of the surface belongs to the map.
 	_panel(root, Rect2(1190, 70, 250, 830), Color("#172421"))
@@ -1693,9 +1826,10 @@ func _show_summary_overlay() -> void:
 			skill_names.append(str(skill["name"]))
 	var skills_text := ", ".join(skill_names) if not skill_names.is_empty() else "None"
 	if lineage_ended:
-		summary_title_label.text = "THE LINEAGE SCATTERS"
-		summary_title_label.add_theme_color_override("font_color", Color("#e09b84"))
-		summary_epithet_label.text = "%s  ·  Ended at %s (Turn %d / %d)" % [_lineage_epithet(), _format_year(year_bp), turn, CHRONICLE_TURNS]
+		summary_title_label.text = "THE LINEAGE PERISHES" if not death_cause.is_empty() else "THE LINEAGE SCATTERS"
+		summary_title_label.add_theme_color_override("font_color", Color("#e87b69"))
+		var cause_line := "Cause: %s  ·  " % death_cause.capitalize() if not death_cause.is_empty() else ""
+		summary_epithet_label.text = "%s%s  ·  Ended at %s (Turn %d / %d)" % [cause_line, _lineage_epithet(), _format_year(year_bp), turn, CHRONICLE_TURNS]
 	else:
 		summary_title_label.text = "THE CHRONICLE REACHES THE PRESENT"
 		summary_title_label.add_theme_color_override("font_color", Color("#e3c58d"))
@@ -1703,8 +1837,8 @@ func _show_summary_overlay() -> void:
 	summary_body_label.text = (
 		"Rift Valley charted:  %d / %d tiles (%.1f%%)\n"
 		+ "Landmarks discovered:  %d / %d\n"
-		+ "Generations lived:  %d\n"
-		+ "Final stores:  Food %d  ·  Knowledge %d  ·  Cohesion %d\n\n"
+		+ "Generations lived:  %d   ·   Offspring kin bands:  %d   ·   Deaths:  %d\n"
+		+ "Final status:  HP %d  ·  Food %d  ·  Knowledge %d  ·  Cohesion %d  ·  Band %d\n\n"
 		+ "Wildlife species sighted:  %d   ·   Items collected:  %d\n"
 		+ "Hunts completed:  %d   ·   Scavenges:  %d   ·   Shared camps:  %d\n"
 		+ "Skirmishes won / lost:  %d / %d   ·   Predators slain:  %d\n"
@@ -1713,8 +1847,8 @@ func _show_summary_overlay() -> void:
 	) % [
 		explored_tiles.size(), total_tiles, charted_pct,
 		discovered_landmark_names.size(), WORLD_MAP_SCRIPT.LANDMARKS.size(),
-		generation,
-		food, knowledge, cohesion,
+		generation, offspring_bands_founded, deaths_in_band,
+		health, food, knowledge, cohesion, band_adults,
 		wildlife_sighted.size(), items_collected,
 		hunts_completed, scavenges_completed, band_shares_completed,
 		clashes_won, clashes_lost, predators_slain,
@@ -2139,8 +2273,9 @@ func _complete_active_task() -> void:
 				var c_gain := mini(3, 100 - cohesion)
 				cohesion += c_gain
 				_spawn_combat_flash(strike_at, Color("#d4b67c"))
-				_spawn_floating_text("%s driven off!" % species_name, strike_at, Color("#e8d59b"))
-				_event("PREDATOR DRIVEN OFF  /  You clash fiercely and drive off a %s. Food −2, cohesion +%d." % [species_name, c_gain])
+				_spawn_floating_text("%s driven off! −10 HP" % species_name, strike_at, Color("#e8d59b"))
+				_event("PREDATOR DRIVEN OFF  /  You clash fiercely and drive off a %s. Health −10, food −2, cohesion +%d." % [species_name, c_gain])
+				_change_health(-10, "wounds from fighting a %s" % species_name)
 		"share":
 			var band_index := int(extra.get("band_index", 0))
 			band_shares_completed += 1
@@ -2396,6 +2531,27 @@ func _advance_season() -> void:
 		cohesion = clampi(cohesion + 1, 0, 100)
 	_complete_succession()
 	_tick_band_membership()
+	# Seasonal health recovery, starvation, wound bleed, and old-age frailty.
+	player_actor["wounded"] = wounded_seasons > 0
+	if food == 0:
+		_change_health(-STARVATION_HEALTH_PENALTY, "starvation")
+		if _run_ended():
+			return
+	elif wounded_seasons > 0 and food <= 15:
+		_change_health(-6, "untreated wounds and hunger")
+		if _run_ended():
+			return
+	elif food > 30 and wounded_seasons == 0 and health < MAX_HEALTH:
+		var heal_amt := 16 if (tile in WORLD_MAP_SCRIPT.SPRING_TILES or tile == WORLD_MAP_SCRIPT.SHELTERED_CLIFF_TILE) else 12
+		_change_health(heal_amt)
+	if adult_age >= AGING_MORTAL_AGE and succession_turn < 0 and turn < CHRONICLE_TURNS:
+		_change_health(-20, "old age")
+		if _run_ended():
+			return
+	elif adult_age >= AGING_FRAIL_AGE and succession_turn < 0 and turn < CHRONICLE_TURNS:
+		_change_health(-10, "old age")
+		if _run_ended():
+			return
 	if adult_age >= AGING_COHESION_AGE and succession_turn < 0 and turn < CHRONICLE_TURNS:
 		cohesion = maxi(0, cohesion - 2)
 		if not aging_warned:
@@ -2404,15 +2560,8 @@ func _advance_season() -> void:
 	if food > 0:
 		starvation_warned = false
 	if cohesion == 0:
-		lineage_ended = true
-		_cancel_active_task(false)
-		movement_key = KEY_NONE
-		player_actor["route"] = []
-		_event("LINEAGE LOST  /  Without enough food and cohesion, your band scatters across the Rift Valley.")
-		_refresh_ui()
-		_show_summary_overlay()
+		_end_lineage_by_death("collapse of social cohesion")
 		_mark_all_chunks_dirty()
-		_redraw_dynamic()
 		_sync_wildlife()
 		return
 	if food == 0 and not starvation_warned:
@@ -2769,6 +2918,7 @@ func _complete_succession() -> void:
 	child_stage = 0
 	var cohesion_gain := mini(SUCCESSION_COHESION, 100 - cohesion)
 	cohesion += cohesion_gain
+	_change_health(25)
 	var kin_band := _spawn_offspring_band()
 	_sync_hominin_models()
 	_request_3d_update()
@@ -2811,8 +2961,38 @@ func _refresh_stats_bar() -> void:
 	var coh_tag := " · tight" if cohesion >= COHESION_HIGH else (" · strained" if cohesion < COHESION_LOW else "")
 	var band_text := "%d+child" % band_adults if has_child else str(band_adults)
 	var gen_text := "%d · aging" % generation if adult_age >= AGING_RANGE_PENALTY_AGE else str(generation)
-	var wound_tag := "  ◇  WOUNDED" if wounded_seasons > 0 else ""
-	stats_label.text = "FOOD %d  ◇  KNOW %d  ◇  COHESION %d%s  ◇  BAND %s  ◇  GEN %s%s" % [food, knowledge, cohesion, coh_tag, band_text, gen_text, wound_tag]
+	stats_label.text = "FOOD %d  ◇  KNOW %d  ◇  COHESION %d%s  ◇  BAND %s  ◇  GEN %s" % [food, knowledge, cohesion, coh_tag, band_text, gen_text]
+	if is_instance_valid(health_bar_fill):
+		var frac := clampf(float(health) / float(MAX_HEALTH), 0.0, 1.0)
+		health_bar_fill.size.x = 222.0 * frac
+		var hp_state := "HEALTHY"
+		var bar_col := Color("#5ba176")
+		if health <= 0:
+			hp_state = "DEAD"
+			bar_col = Color("#8f352e")
+		elif health < 35:
+			hp_state = "CRITICAL"
+			bar_col = Color("#d94c3d")
+		elif wounded_seasons > 0:
+			hp_state = "WOUNDED"
+			bar_col = Color("#d47a3e")
+		elif health < 65:
+			hp_state = "INJURED"
+			bar_col = Color("#cfa048")
+		health_bar_fill.color = bar_col
+		health_bar_label.text = "HP %d  ·  %s" % [health, hp_state]
+	if is_instance_valid(health_status_label):
+		var notes: Array[String] = ["STR %d" % _player_combat_strength(true)]
+		if wounded_seasons > 0:
+			notes.append("Wounded (%ds) · Figs heal" % wounded_seasons)
+		if food == 0:
+			notes.append("Starving (−%d HP/s)" % STARVATION_HEALTH_PENALTY)
+		elif adult_age >= AGING_FRAIL_AGE and succession_turn < 0:
+			notes.append("Frail elder (−%d HP/s)" % (20 if adult_age >= AGING_MORTAL_AGE else 10))
+		elif health < MAX_HEALTH and food > 30 and wounded_seasons == 0:
+			notes.append("Recovering (+12 HP/s)")
+		health_status_label.text = "  ·  ".join(notes)
+		health_status_label.add_theme_color_override("font_color", Color("#f08d78") if (health < 35 or food == 0 or wounded_seasons > 0) else Color("#b9c4b8"))
 
 
 func _refresh_ui() -> void:
